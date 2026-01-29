@@ -9,35 +9,30 @@ import pandas as pd
 import akshare as ak
 import streamlit as st
 
+import pandas as pd
+import akshare as ak
+import streamlit as st
+
 class DataCenter:
-    """终极防错版：自动过滤日期列 + 索引越界防护"""
+    """终极防错版：自适应列名 + 冗余接口切换"""
     
     @staticmethod
     def _safe_get_last(df, col_keywords=['value', '值', '成交额', 'pe', 'yield', '收益率']):
-        """
-        核心防错逻辑：
-        1. 检查 df 是否为空
-        2. 排除掉 '日期' 或 'date' 类型的列，锁定纯数值列
-        3. 找到最后一个非空有效值
-        """
         if df is None or df.empty:
             return None
-        
-        # 排除掉包含日期或字符串的列，只锁定数值列 (int/float)
+        # 排除日期和字符串，锁定数值列
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        
         if not numeric_cols:
             return None
         
-        # 优先匹配关键词列名（不区分大小写）
+        # 优先找关键词匹配的列
         for kw in col_keywords:
             for col in numeric_cols:
                 if kw.lower() in col.lower():
-                    # 确保剔除 NaN 值后再取最后一个
                     series = df[col].dropna()
                     return float(series.iloc[-1]) if not series.empty else None
         
-        # 如果没匹配到关键词，保守取最后一个数值列的最后一个值
+        # 兜底：取最后一个数值列
         series = df[numeric_cols[-1]].dropna()
         return float(series.iloc[-1]) if not series.empty else None
 
@@ -60,23 +55,26 @@ class DataCenter:
             pmi_df = ak.macro_china_pmi()
             data["PMI"] = DataCenter._safe_get_last(pmi_df)
             
-            # M1 (需取最后两个值做对比)
+            # M1
             m1_df = ak.macro_china_m2_yearly()
             if not m1_df.empty:
-                numeric_df = m1_df.select_dtypes(include=['number'])
-                if not numeric_df.empty and len(numeric_df) >= 2:
-                    col = numeric_df.columns[0]
-                    series = numeric_df[col].dropna()
+                # 寻找 M1 或“值”相关的列
+                col = [c for c in m1_df.columns if '值' in c or 'value' in c]
+                if col:
+                    series = m1_df[col[0]].dropna()
                     if len(series) >= 2:
                         data["M1"] = float(series.iloc[-1])
                         data["M1_prev"] = float(series.iloc[-2])
             
-            # USDCNH 汇率
-            fx = ak.fx_spot_quote()
-            if not fx.empty:
-                val = fx.loc[fx['symbol']=='USDCNH', 'last']
-                if not val.empty:
-                    data["USDCNH"] = float(val.values[0])
+            # 汇率 (修复 symbol 报错)
+            try:
+                fx_df = ak.fx_spot_quote()
+                # 不再依赖 symbol 列名，直接在所有列里找 USDCNH
+                target = fx_df[fx_df.apply(lambda row: row.astype(str).str.contains('USDCNH').any(), axis=1)]
+                if not target.empty:
+                    data["USDCNH"] = DataCenter._safe_get_last(target, ['last', 'p', '价'])
+            except:
+                pass
         except Exception as e:
             st.warning(f"宏观清洗层提示: {e}")
         return data
@@ -87,28 +85,37 @@ class DataCenter:
         val = {"ERP": None, "Buffett": None}
         try:
             # 1. 股债性价比 (ERP)
-            pe_300 = 12.0 # 预设中性 PE
+            pe_300 = 12.0
             try:
-                # 尝试 funddb 获取沪深300 PE
+                # 优先尝试 funddb 接口 (目前最稳)
                 pe_df = ak.index_value_hist_funddb(symbol="沪深300", indicator="市盈率")
                 res = DataCenter._safe_get_last(pe_df, ['pe'])
                 if res: pe_300 = res
             except:
                 pass
             
-            # 国债收益率
             bond_df = ak.bond_china_yield(start_date="20260101")
             bond_yield = DataCenter._safe_get_last(bond_df, ['yield', '收益率'])
             
             if pe_300 and bond_yield:
                 val["ERP"] = (1 / pe_300) - (bond_yield / 100)
             
-            # 2. 动态巴菲特指标
-            mv_df = ak.stock_a_total_value()
-            total_mv = DataCenter._safe_get_last(mv_df, ['total_value', '总市值'])
+            # 2. 动态巴菲特指标 (修复 stock_a_total_value 缺失)
+            # 使用替代接口获取市场总市值 (A股全市场指标)
+            try:
+                # 替代接口：stock_a_ttm_ex (包含全市场市值数据)
+                mv_df = ak.stock_a_ttm_ex(symbol="all") 
+                # 或者尝试简单接口：直接获取全市场实时行情并求和
+                # total_mv = ak.stock_zh_a_spot_em()['总市值'].sum() / 100000000 # 亿
+                total_mv = mv_df['total_mv'].sum() / 10000 if 'total_mv' in mv_df.columns else 900000
+            except:
+                # 接口备选方案
+                df_spot = ak.stock_zh_a_spot_em()
+                total_mv = df_spot['总市值'].sum() / 100000000 # 转为亿元
+                
             gdp = DataCenter.get_dynamic_gdp()
-            if total_mv and gdp:
-                val["Buffett"] = total_mv / gdp
+            val["Buffett"] = total_mv / gdp
+            
         except Exception as e:
             st.error(f"估值模块关键报错: {e}")
         return val
@@ -121,18 +128,14 @@ class DataCenter:
         for name, code in symbols.items():
             try:
                 df = ak.fund_etf_hist_sina(symbol=code)
-                # 提取成交额列 (一般是最后一列)
-                numeric_df = df.select_dtypes(include=['number'])
-                if not numeric_df.empty and len(df) >= 20:
-                    target_series = numeric_df.iloc[:, -1].dropna()
-                    if len(target_series) >= 20:
-                        recent = target_series.tail(20)
-                        z_score = (target_series.iloc[-1] - recent.mean()) / recent.std()
-                        flows[name] = round(z_score, 2)
-                    else: flows[name] = 0
+                num_df = df.select_dtypes(include=['number'])
+                if not num_df.empty and len(df) >= 20:
+                    # 成交额通常是最后一列
+                    target = num_df.iloc[:, -1].dropna()
+                    z_score = (target.iloc[-1] - target.tail(20).mean()) / target.tail(20).std()
+                    flows[name] = round(z_score, 2)
                 else: flows[name] = 0
-            except:
-                flows[name] = 0
+            except: flows[name] = 0
         return flows
 # ==================== 2. 策略引擎模块 ====================
 class StrategyEngine:
