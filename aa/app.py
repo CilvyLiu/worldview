@@ -4,8 +4,8 @@ import streamlit as st
 import io
 from datetime import datetime
 
-# ==================== 1. 汪汪队 28 只核心标的 ====================
-WANGWANG_LIST = [
+# ==================== 1. 核心标的代码映射 ====================
+WANGWANG_MAP = [
     {"战队": "🛡️ 压舱石", "名称": "中国神华", "代码": "601088"},
     {"战队": "🛡️ 压舱石", "名称": "长江电力", "代码": "600900"},
     {"战队": "🛡️ 压舱石", "名称": "工商银行", "代码": "601398"},
@@ -30,116 +30,125 @@ WANGWANG_LIST = [
     {"战队": "📈 守护者", "名称": "招商银行", "代码": "600036"},
     {"战队": "📈 守护者", "名称": "中国平安", "代码": "601318"},
     {"战队": "📈 守护者", "名称": "贵州茅台", "代码": "600519"},
-    {"战domain": "📈 守护者", "名称": "五粮液", "代码": "000858"},
+    {"战队": "📈 守护者", "名称": "五粮液", "代码": "000858"},
     {"战队": "📈 守护者", "名称": "美的集团", "代码": "000333"},
     {"战队": "📈 守护者", "名称": "兴业银行", "代码": "601166"},
     {"战队": "📈 守护者", "名称": "格力电器", "代码": "000651"}
 ]
 
-# ==================== 2. UI 界面 ====================
+# ==================== 2. 全自动增强引擎 ====================
+class NovaAutoEngine:
+    @staticmethod
+    def get_market_data():
+        """全自动抓取：宏观+指数+市值"""
+        # 默认保底值 (2026年基准)
+        data = {"PMI": 50.1, "M1": 0.5, "HS300": 0.0, "Total_MV": 860000.0}
+        
+        try:
+            # 1. 指数全抓取
+            idx_df = ak.stock_zh_index_spot_em()
+            hs300_row = idx_df[idx_df['名称'] == '沪深300']
+            if not hs300_row.empty:
+                data["HS300"] = float(hs300_row['涨跌幅'].values[0])
+            
+            # 2. 市值自动抓取
+            mv_df = ak.stock_a_total_value()
+            data["Total_MV"] = float(mv_df.iloc[-1]['total_value'])
+            
+            # 3. 宏观数据
+            pmi_df = ak.macro_china_pmi()
+            data["PMI"] = float(pmi_df.iloc[-1]['value'])
+        except Exception as e:
+            st.warning(f"⚠️ 部分自动口径受限 (海外IP/非交易时间)，已启用逻辑保底。")
+        
+        return data
+
+# ==================== 3. UI 界面 ====================
 def main():
-    st.set_page_config(page_title="Nova 汪汪队探测器", layout="wide")
-    st.title("🏹 Nova 汪汪队全案探测系统")
-
-    # --- 侧边栏：参数干预 (这是宏观面的核心来源) ---
-    with st.sidebar:
-        st.header("⚙️ 宏观面手动干预")
-        user_gdp = st.number_input("1. 手动输入 GDP (亿元):", value=1300000, step=10000)
-        user_mv = st.number_input("2. 手动输入 A股总市值 (亿元):", value=850000, step=10000)
-        user_pmi = st.slider("3. PMI 荣枯值设定:", 45.0, 55.0, 50.1)
-        user_m1 = st.slider("4. M1 增速差设定:", -5.0, 5.0, 0.5)
-        st.divider()
-        run_scan = st.button("🚀 开启 28 只全板块主力探测", use_container_width=True)
-
-    # --- 3. 动态指标计算 (不调用接口，直接用输入值) ---
-    buffett_val = (user_mv / user_gdp) * 100 if user_gdp > 0 else 0
+    st.set_page_config(page_title="Nova 探测器 2026", layout="wide")
     
-    # 风格判定逻辑
-    style = "🔍 震荡格局"
-    if user_pmi > 50 and user_m1 > 0: style = "🚀 扩张点火 (顺周期)"
-    elif user_pmi < 50 and user_m1 < 0: style = "🛡️ 缩表防御 (红利低估)"
-    elif buffett_val < 65: style = "💎 底部反转区域"
+    # 初始化自动数据
+    auto_data = NovaAutoEngine.get_market_data()
 
-    # --- 4. 顶部仪表盘 ---
+    st.title("🏹 Nova 汪汪队全自动探测系统")
+
+    with st.sidebar:
+        st.header("⚙️ 自动化修正")
+        # GDP 还是得你确认一下，毕竟那是你的“算力分母”
+        gdp = st.number_input("1. GDP 分母 (亿元):", value=1300000)
+        
+        # 指数修正 (如果自动抓取失败，你可以在这手动改)
+        st.divider()
+        st.subheader("📊 指数手动纠偏")
+        fix_hs300 = st.number_input("沪深300涨幅(%) [自动同步中]:", value=auto_data["HS300"])
+        
+        st.divider()
+        run_scan = st.button("🚀 开启 28 只全板块穿透", use_container_width=True)
+
+    # 核心指标展示
+    
+    buffett_val = (auto_data["Total_MV"] / gdp) * 100
     
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("巴菲特指标", f"{round(buffett_val, 2)}%", f"{'低估' if buffett_val < 75 else '高估'}")
-    c2.metric("PMI 设定值", user_pmi, f"{round(user_pmi-50, 2)}")
-    c3.metric("M1 活性增量", f"{user_m1}%")
-    c4.metric("当前风格取向", style)
+    c1.metric("巴菲特指标 (自动)", f"{round(buffett_val, 2)}%", f"{round(auto_data['Total_MV']/10000, 1)}万亿")
+    c2.metric("PMI 荣枯线", auto_data["PMI"], f"{round(auto_data['PMI']-50, 1)}")
+    c3.metric("沪深300参考", f"{fix_hs300}%")
+    
+    style = "💎 底部价值" if buffett_val < 65 else "⚖️ 均衡博弈"
+    if auto_data["PMI"] > 50: style = "🚀 扩张点火"
+    c4.metric("风格判定", style)
 
     st.divider()
 
-    # --- 5. 汪汪队探测报告 ---
     if run_scan:
-        with st.spinner("正在强制穿透 28 只标的数据口径..."):
+        with st.spinner("正在点名探测 28 只核心标的..."):
+            # 采用你给的 SuperEngine 逻辑，但加入更强的空值处理
             results = []
-            # 这里的接口调用是最后一道防线
             try:
-                # 尝试一次性获取个股快照，如果失败则走个股遍历
                 spot_df = ak.stock_zh_a_spot_em()
             except:
                 spot_df = pd.DataFrame()
 
-            progress_text = st.empty()
-            pb = st.progress(0)
-
-            for i, stock in enumerate(WANGWANG_LIST):
-                progress_text.text(f"正在探测: {stock['名称']} ({stock['代码']})")
-                data = {"pct": 0.0, "turnover": 0.0}
+            for s in WANGWANG_MAP:
+                # 优先级 1: 实时快照
+                row = spot_df[spot_df['代码'] == s['代码']] if not spot_df.empty else pd.DataFrame()
                 
-                # 口径 A：大表匹配
-                if not spot_df.empty:
-                    row = spot_df[spot_df['代码'] == stock['代码']]
-                    if not row.empty:
-                        data["pct"] = float(row['涨跌幅'].values[0])
-                        data["turnover"] = float(row['成交额'].values[0])
-                
-                # 口径 B：若大表失败，尝试历史单兵接口 (最后一天)
-                if data["pct"] == 0.0:
+                if not row.empty:
+                    pct = float(row['涨跌幅'].values[0])
+                    turnover = float(row['成交额'].values[0])
+                else:
+                    # 优先级 2: 历史接口回溯最近一分钟
                     try:
-                        hist = ak.stock_zh_a_hist(symbol=stock['代码'], period="daily", adjust="qfq").iloc[-1:]
-                        data["pct"] = float(hist['涨跌幅'].values[0])
-                        data["turnover"] = float(hist['成交额'].values[0])
-                    except: pass
-                
+                        hist = ak.stock_zh_a_hist(symbol=s['代码'], period="daily", adjust="qfq").iloc[-1:]
+                        pct = float(hist['涨跌幅'].values[0])
+                        turnover = float(hist['成交额'].values[0])
+                    except:
+                        pct, turnover = 0.0, 0.0
+
                 results.append({
-                    "战队分类": stock['战队'],
-                    "标的名称": stock['名称'],
-                    "代码": stock['代码'],
-                    "实时涨幅%": data["pct"],
-                    "成交额(亿)": round(data["turnover"] / 1e8, 2)
+                    "战队分类": s['战队'], "名称": s['名称'], "涨幅%": pct,
+                    "超额收益%": round(pct - fix_hs300, 2),
+                    "成交额(亿)": round(turnover/1e8, 2)
                 })
-                pb.progress((i + 1) / len(WANGWANG_LIST))
-            
+
             df = pd.DataFrame(results)
-            progress_text.empty()
-
+            
             if not df.empty:
-                # 简单动向判定
-                df['主力动向'] = df.apply(lambda x: "🔥 强力介入" if x['实时涨幅%'] > 1.2 else ("🛡️ 护盘支撑" if -0.2 < x['实时涨幅%'] < 0.2 and x['成交额(亿)'] > 5 else "⚪ 正常跟随"), axis=1)
+                # 汪汪队逻辑判定
+                df['主力动向'] = df.apply(lambda x: 
+                    "🔥 强力扫货" if x['超额收益%'] > 1.2 else (
+                    "🛡️ 护盘支撑" if x['超额收益%'] >= 0 and fix_hs300 < -0.3 else "⚪ 正常跟随"
+                ), axis=1)
 
-                # 展示与导出
-                v1, v2 = st.columns([1, 2])
-                with v1:
-                    st.write("📈 主力介入分布")
-                    st.bar_chart(df['主力动向'].value_counts())
-                with v2:
-                    st.write("💰 战队资金流量")
-                    st.bar_chart(df.groupby('战队分类')['成交额(亿)'].sum())
+                # 数据可视化
+                st.subheader("📋 汪汪队实时动向穿透")
+                st.dataframe(df.style.background_gradient(subset=['涨幅%'], cmap='RdYlGn_r'), use_container_width=True)
 
-                st.subheader("📋 详细作战报告")
-                st.dataframe(df.style.background_gradient(subset=['实时涨幅%'], cmap='RdYlGn_r'), use_container_width=True)
-
-                # Excel 导出
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='汪汪队探测')
-                st.sidebar.download_button("📥 导出作战 Excel", output.getvalue(), "Nova_Report.xlsx")
+                # 战队汇总
+                st.write("💰 战队资金活跃度对比")
+                st.bar_chart(df.groupby('战队分类')['成交额(亿)'].sum())
             else:
-                st.error("所有取数口径均告失败。可能是由于节假日无行情数据，或防火墙彻底封锁。")
-    else:
-        st.info("👋 Nova，我已经将宏观面改为**手动干预模式**以规避接口封禁。请在左侧调整参数后点击‘开启探测’。")
+                st.error("🚨 探测器所有路径均被封锁，请检查网络或更换本地运行环境。")
 
 if __name__ == "__main__":
     main()
