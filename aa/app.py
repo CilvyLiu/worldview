@@ -4,15 +4,7 @@ import streamlit as st
 import plotly.express as px
 from datetime import datetime
 
-# ==================== 1. 数据采集模块 ====================
-import pandas as pd
-import akshare as ak
-import streamlit as st
-
-import pandas as pd
-import akshare as ak
-import streamlit as st
-
+#=======================数据中心=======================#
 class DataCenter:
     """终极防错版：自适应列名 + 冗余接口切换"""
     
