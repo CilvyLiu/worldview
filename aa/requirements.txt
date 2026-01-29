@@ -1,5 +1,5 @@
-streamlit>=1.25.0
-akshare>=1.13.0
-pandas>=2.0.0
-numpy
-plotly
+streamlit>=1.30.0
+akshare>=1.12.0
+pandas>=2.1.0
+numpy>=1.26.0
+requests>=2.31.0
