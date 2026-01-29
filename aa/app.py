@@ -1,187 +1,80 @@
 import streamlit as st
-import akshare as ak
 import pandas as pd
 import numpy as np
-import requests
-import random
-import time
-from datetime import datetime
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import io
 
-# =================== 1. 协议穿透引擎 (Nova 专属：抗封锁双轨版) ===================
+# =================== 1. 投行公式计算核心 (公式 1:1 还原) ===================
 
-class NovaRobustConnector:
-    """具备指纹伪装与指数退避重连的顶级连接器"""
-    def __init__(self):
-        self.session = requests.Session()
-        # 定义重试规则：针对物理断开、连接超时自动重试 5 次
-        retries = Retry(
-            total=5,
-            backoff_factor=1,  # 失败后等待时间依次增加 (1s, 2s, 4s...)
-            status_forcelist=[500, 502, 503, 504],
-            raise_on_status=False
-        )
-        self.session.mount('https://', HTTPAdapter(max_retries=retries))
-
-    def get_dynamic_headers(self):
-        """生成随机浏览器指纹"""
-        chrome_ver = f"{random.randint(110, 122)}.0.{random.randint(1000, 6000)}.{random.randint(10, 200)}"
-        return {
-            "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_ver} Safari/537.36",
-            "Referer": "https://quote.eastmoney.com/center/boardlist.html",
-            "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Connection": "keep-alive"
-        }
-
-    def fetch(self, url, params):
-        """核心拉取方法：注入随机指纹与防抖延迟"""
-        try:
-            params['cb'] = f"jQuery{random.randint(1000000, 9999999)}_{int(time.time()*1000)}"
-            params['_'] = int(time.time()*1000)
-            
-            # 关键：模拟人工点击间的微小间隔
-            time.sleep(random.uniform(0.3, 0.7))
-            
-            resp = self.session.get(url, params=params, headers=self.get_dynamic_headers(), timeout=15)
-            # 提取 JSON 数据 (处理 jQuery 回调包裹)
-            text = resp.text
-            if not text or "(" not in text:
-                return None
-            json_str = text[text.find("(")+1 : text.rfind(")")]
-            import json
-            return json.loads(json_str)
-        except Exception:
-            return None
-
-# 全局共用一个 Connector 实例
-if 'nova_conn' not in st.session_state:
-    st.session_state.nova_conn = NovaRobustConnector()
-
-@st.cache_data(ttl=300) # 5分钟内不再重复请求相同板块，防止封 IP
-def get_market_sectors_cached():
-    """板块侦测：采用强化版穿透协议"""
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": "1", "pz": "100", "po": "1", "np": "1",
-        "ut": "b2884a393a59ad64002292a3e90d46a5",
-        "fltt": "2", "invt": "2", "fid": "f62",
-        "fs": "m:90+t:2+f:!50",
-        "fields": "f12,f14,f3,f62,f184"
-    }
-    data = st.session_state.nova_conn.fetch(url, params)
-    if data and 'data' in data and 'diff' in data:
-        df = pd.DataFrame(data['data']['diff']).rename(columns={
-            'f12': 'ID', 'f14': '板块名称', 'f3': '今日涨幅', 
-            'f62': '主力净额', 'f184': '主力占比'
-        })
-        df['板块评分'] = pd.to_numeric(df['主力净额'], errors='coerce') / 100000000
-        return df.sort_values(by='板块评分', ascending=False)
-    return None
-
-@st.cache_data(ttl=60) # 1分钟缓存，避免操作下拉框时重复请求个股数据
-def get_stock_penetration_cached(sector_id):
-    """个股穿透：支持长效 Session 协议"""
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": "1", "pz": "100", "po": "1", "np": "1",
-        "ut": "8dec03ba335b81bf4ebdf7b29ec27d15",
-        "fltt": "2", "invt": "2", "fid": "f164",
-        "fs": f"b:{sector_id}",
-        "fields": "f12,f14,f2,f3,f62,f164,f174"
-    }
-    data = st.session_state.nova_conn.fetch(url, params)
-    if data and 'data' in data and 'diff' in data:
-        df = pd.DataFrame(data['data']['diff']).rename(columns={
-            'f12': '代码', 'f14': '名称', 'f2': '价格', 'f3': '今日涨幅',
-            'f62': '今日主力', 'f164': '5日主力', 'f174': '10日主力'
-        })
-        for c in ['今日主力', '5日主力', '10日主力']:
-            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0) / 10000
-        return df
-    return None
-
-# =================== 2. 扫货痕迹审计 (Nova 核心算法) ===================
-
-class StrategicSniffer:
-    def get_real_trade_dates(self, count=3):
-        try:
-            df = ak.stock_zh_index_daily(symbol="sh000001")
-            return df['date'].tail(count).dt.strftime("%Y%m%d").tolist()[::-1]
-        except: return [datetime.now().strftime("%Y%m%d")]
-
-    def analyze_silent_trace(self, df_tick):
-        if df_tick is None or df_tick.empty: return 0
-        df_tick['price'] = pd.to_numeric(df_tick['price'], errors='coerce')
-        df_tick['成交额'] = pd.to_numeric(df_tick['成交额'], errors='coerce')
-        n_df = df_tick[df_tick['type'] == '中性']
-        n_ratio = len(n_df) / len(df_tick) if len(df_tick) > 0 else 0
-        p_std = df_tick['price'].std()
-        
-        score = 0
-        if n_ratio > 0.40: score += 2 
-        if p_std is not None and p_std < 0.005: score += 2  
-        return score
-
-# =================== 3. 动态侦测 UI ===================
-
-st.set_page_config(page_title="Sniffer Pro V12.0", layout="wide")
-sniffer = StrategicSniffer()
-dates = sniffer.get_real_trade_dates(3)
-
-st.title("🏛️ Sniffer Pro V12.0 - 投行级稳健系统")
-st.caption(f"Nova 专属模式 | 已激活随机指纹对抗协议")
-
-# --- Step 1 ---
-st.header("Step 1: 全市场板块资金侦测")
-df_all = get_market_sectors_cached()
-
-if df_all is not None:
-    st.dataframe(df_all, use_container_width=True)
-    csv_s1 = df_all.to_csv(index=False).encode('utf_8_sig')
-    st.download_button("📥 导出板块报告", data=csv_s1, file_name="Sectors.csv")
+def run_sniffer_audit(df, mode="stock"):
+    # 强制数值化处理
+    for col in df.columns:
+        if col not in ['名称', '代码', '审计判语']:
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace('%', ''), errors='coerce').fillna(0)
     
-    st.divider()
-    s_map = df_all.set_index('板块名称')['ID'].to_dict()
-    target_sec = st.selectbox("🎯 选定待审计板块:", ["请选择探测目标"] + list(s_map.keys()))
+    if mode == "sector":
+        # First: 空间坐标定位（板块初筛）
+        # 逻辑：板块占比 > 3% 且 涨幅 < 2% 为“疑似静默扫货区”
+        df['L-H预警'] = (df['主力占比'] > 3.0) & (df['今日涨幅'] < 2.0)
+        return df.sort_values(by='主力占比', ascending=False)
+    
+    else:
+        # Next: 个股审计公式还原
+        
+        # 1. Ea = 今日主力净额 / (成交量 * 振幅)
+        # 振幅加 0.1 平滑项防止除零，同时捕捉“极小范围波动”的静默特征
+        df['Ea'] = df['今日主力'] / (df['成交量'] * (df['振幅'] + 0.1))
+        
+        # 2. Sm = Σ(Inflow_t * w_t) / σ(Inflow)
+        # w_t 时间衰减权重设定：今日 0.5, 5日 0.3, 10日 0.2
+        df['weighted_sum'] = df['今日主力']*0.5 + df['5日主力']*0.3 + df['10日主力']*0.2
+        # 计算资金流标准差 σ (NetInflow)
+        df['std_flow'] = df.apply(lambda x: np.std([x['今日主力'], x['5日主力'], x['10日主力']]), axis=1)
+        df['Sm'] = df['weighted_sum'] / (df['std_flow'] + 1)
+        
+        # 3. Signal = (Today > 0) ∩ (5D < 0) ∩ (10D < 0)
+        # 含义：过去10天/5天在流出洗盘，今天突然反转流入，确认爆发点
+        df['Signal'] = (df['今日主力'] > 0) & (df['5日主力'] < 0) & (df['10日主力'] < 0)
+        
+        return df.sort_values(by='Ea', ascending=False)
 
-    if target_sec != "请选择探测目标":
-        sid = s_map[target_sec]
-        # --- Step 2 ---
-        st.header(f"Step 2: {target_sec} - 个股侦测")
-        df_s = get_stock_penetration_cached(sid)
-        if df_s is not None:
-            df_s['侦测状态'] = np.where((df_s['5日主力'] > 500) & (df_s['今日涨幅'] < 1.5), "💎 疑似静默扫货", "正常波动")
-            st.dataframe(df_s, use_container_width=True)
-            
-            # --- Step 3 ---
-            st.divider()
-            st.header("Step 3: 三日深度复盘")
-            targets = st.multiselect("勾选标的:", df_s['名称'].tolist(), 
-                                     default=df_s[df_s['侦测状态']=="💎 疑似静默扫货"]['名称'].tolist()[:2])
-            
-            if targets:
-                if st.button("🔍 开始执行 Tick 审计 (Nova 算法)"):
-                    reports = []
-                    p_bar = st.progress(0)
-                    selected = df_s[df_s['名称'].isin(targets)]
-                    for idx, (s_idx, row) in enumerate(selected.iterrows()):
-                        c = str(row['代码']).zfill(6)
-                        f = f"{'sh' if c.startswith('6') else 'sz'}{c}"
-                        r = {"名称": row['名称'], "审计得分": 0}
-                        ts = 0
-                        for d in dates:
-                            try:
-                                d_t = ak.stock_zh_a_tick_163(symbol=f, date=d)
-                                s = sniffer.analyze_silent_trace(d_t)
-                            except: s = 0
-                            ts += s
-                        r["审计得分"] = ts
-                        reports.append(r)
-                        p_bar.progress((idx + 1) / len(selected))
-                    
-                    st.table(pd.DataFrame(reports))
-                    st.download_button("📥 导出报告", pd.DataFrame(reports).to_csv(index=False).encode('utf_8_sig'), "Audit.csv")
-else:
-    st.info("🔄 正在绕过防火墙，请点击右侧侧边栏 'Clear Cache' 或稍后再试。")
+# =================== 2. UI 界面设计 ===================
+
+st.set_page_config(page_title="Sniffer 嗅嗅 Audit Terminal", layout="wide")
+st.title("🏛️ Sniffer 嗅嗅 - 投行数据审计终端")
+st.caption("系统逻辑：寻找资金流向与价格波动的‘非线性背离’")
+
+# --- Step 1: 板块数据输入 (First) ---
+st.header("Step 1: First - 板块 L-H 象限确认")
+st.markdown("💡 **操作指南**：粘贴板块列表（名称 | 今日涨幅 | 主力占比），筛选占比 > 3% 且 涨幅 < 2% 的目标。")
+
+sector_input = st.text_area("📋 粘贴板块数据", height=150, placeholder="软件开发 1.2 4.5\n医疗服务 -0.5 3.8")
+
+if sector_input:
+    # 支持空格或制表符分隔
+    sec_df = pd.read_csv(io.StringIO(sector_input), sep=r'\s+', names=['名称', '今日涨幅', '主力占比'])
+    sec_res = run_sniffer_audit(sec_df, mode="sector")
+    
+    st.write("🚩 板块审计结果 (绿色为 L-H 扫货预警区)：")
+    st.dataframe(sec_res.style.applymap(lambda x: 'background-color: #d4edda; color: #155724' if x == True else '', subset=['L-H预警']), use_container_width=True)
+
+# --- Step 2: 个股数据输入 (Next) ---
+st.divider()
+st.header("Step 2: Next - 个股 5日/10日 穿透审计")
+st.markdown("💡 **操作指南**：在目标板块中复制个股数据（名称 | 今日主力 | 5日主力 | 10日主力 | 成交量 | 振幅）。")
+
+stock_input = st.text_area("📋 粘贴个股数据", height=200, placeholder="股票A 5000 -2000 -8000 100000 2.5")
+
+if stock_input:
+    st.info("💡 正在执行 Sniffer $E_a$ & $S_m$ 双重审计逻辑...")
+    st_df = pd.read_csv(io.StringIO(stock_input), sep=r'\s+', 
+                        names=['名称', '今日主力', '5日主力', '10日主力', '成交量', '振幅'])
+    st_res = run_sniffer_audit(st_df, mode="stock")
+    
+    # 展示核心审计指标
+    st.dataframe(st_res[['名称', 'Ea', 'Sm', 'Signal']], use_container_width=True)
+    
+    # 确权提醒
+    targets = st_res[st_res['Signal'] == True]
+    if not targets.empty:
+        st.success(f"🎯 爆发点确认：{', '.join(targets['名称'].tolist())} 符合 (Today+) ∩ (5D-) ∩ (10D-) 反转逻辑")
+        st.warning("⚠️ Finally: 请手动配合 15分钟K线 缩量上涨进行最后确权")
