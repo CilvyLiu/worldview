@@ -12,7 +12,6 @@ def get_safe_sectors():
     """安全获取板块列表，自动修正列名"""
     try:
         df = ak.stock_sector_fund_flow_rank(indicator="今日")
-        # 模糊匹配：只要包含'名称'或'代码'的列就抓出来
         name_col = [c for c in df.columns if '名称' in c][0]
         code_col = [c for c in df.columns if '代码' in c][0]
         return df, name_col, code_col
@@ -50,9 +49,7 @@ class StrategicSniffer:
         except: return []
 
     def analyze_silent_trace(self, df_tick):
-        """
-        核心算法：高频小单中性盘 + 极低价格波动 = 庄家算法吸筹
-        """
+        """核心算法：高频小单中性盘 + 极低价格波动 = 庄家算法吸筹"""
         if df_tick is None or df_tick.empty: return 0
         df_tick['price'] = pd.to_numeric(df_tick['price'], errors='coerce')
         df_tick['成交额'] = pd.to_numeric(df_tick['成交额'], errors='coerce')
@@ -69,18 +66,18 @@ class StrategicSniffer:
         return score
 
 # =================== 3. UI 展现层 ===================
-st.set_page_config(page_title="Sniffer Pro V9.8", layout="wide")
+st.set_page_config(page_title="Sniffer Pro V10.0", layout="wide")
 sniffer = StrategicSniffer()
 dates = sniffer.get_real_trade_dates(3)
 
-st.title("🏛️ Sniffer Pro V9.8 - 静默扫货审计系统")
+st.title("🏛️ Sniffer Pro V10.0 - 静默扫货审计与导出系统")
 
 # --- 侧边栏：导入与配置 ---
 st.sidebar.header("📂 数据中心")
 uploaded_file = st.sidebar.file_uploader("导入历史审计报告 (CSV)", type="csv")
 if uploaded_file:
     st.sidebar.success("历史数据已载入")
-    # 可选：展示历史对比逻辑
+    # 此处可扩展历史比对逻辑
 
 # --- Step 1: 板块穿透逻辑 ---
 df_sectors, name_col, code_col = get_safe_sectors()
@@ -94,8 +91,10 @@ if df_sectors is not None:
     if selected_sector != "请选择":
         sid = sector_map[selected_sector]
         
-        # 自动计算板块评分 (基于主力占比)
-        sector_score = float(df_sectors[df_sectors[name_col]==selected_sector]['主力净额'].iloc[0]) / 10000
+        # 自动计算板块评分 (基于主力净额)
+        sector_score = float(df_sectors[df_sectors[name_col]==selected_sector]['今日主力净流入'].iloc[0]) if '今日主力净流入' in df_sectors.columns else 0
+        if sector_score == 0: # 容错处理
+             sector_score = float(df_sectors[df_sectors[name_col]==selected_sector].iloc[:, 3]) # 通常是资金列
         
         df_stocks = protocol_penetrator_stock_flow(sid)
         
@@ -104,8 +103,8 @@ if df_sectors is not None:
                 (df_stocks['5日主力'] > 500) & (df_stocks['今日涨幅'] < 1.5), 
                 "💎 静默扫货", "正常波动"
             )
-            st.subheader(f"📍 {selected_sector} (评分: {sector_score:.2f}万) 资金流看板")
-            # 兼容性渲染：改用原生 column_config 避免 matplotlib 缺失错误
+            st.subheader(f"📍 {selected_sector} (板块强度: {sector_score:,.2f}) 资金流看板")
+            
             st.dataframe(df_stocks, use_container_width=True, column_config={
                 "5日主力": st.column_config.ProgressColumn(min_value=0, max_value=5000, format="%.0f万"),
                 "今日涨幅": st.column_config.NumberColumn(format="%.2f%%")
@@ -122,21 +121,21 @@ if df_sectors is not None:
                 p_bar = st.progress(0)
                 selected_df = df_stocks[df_stocks['名称'].isin(targets)]
                 
-                for idx, row in selected_df.iterrows():
+                for idx, (s_idx, row) in enumerate(selected_df.iterrows()):
                     code_str = str(row['代码']).zfill(6)
                     f_code = f"{'sh' if code_str.startswith('6') else 'sz'}{code_str}"
                     
+                    # 构造基础行（包含板块评分）
                     report_row = {
-                        "板块": selected_sector,
-                        "板块评分": round(sector_score, 2),
-                        "名称": row['名称'], "代码": code_str, "状态": row['启动状态'],
+                        "板块名称": selected_sector,
+                        "板块今日评分": round(sector_score / 10000, 2), # 换算为万
+                        "名称": row['名称'], "代码": code_str, "审计状态": row['启动状态'],
                         "5日主力(万)": row['5日主力'], "今日涨幅": row['今日涨幅']
                     }
                     
                     matrix_scores = []
                     for i, date in enumerate(dates):
                         try:
-                            # 穿透网易 Tick 接口
                             df_t = ak.stock_zh_a_tick_163(symbol=f_code, date=date)
                             s = sniffer.analyze_silent_trace(df_t)
                         except: s = 0
@@ -150,21 +149,24 @@ if df_sectors is not None:
                 df_rep = pd.DataFrame(reports)
                 
                 # 展现最终审计矩阵
-                st.subheader("📊 审计评分矩阵")
+                st.subheader("📊 审计评分矩阵 (已整合板块评分)")
                 st.dataframe(df_rep, use_container_width=True)
                 
                 # --- Step 3: 导出 ---
                 st.divider()
-                st.header("Step 3: 导出综合报告")
+                st.header("Step 3: 导出综合分析报告")
+                
+                # 导出按钮
                 csv_data = df_rep.to_csv(index=False).encode('utf_8_sig')
                 
-                col1, col2 = st.columns(2)
-                with col1:
+                col_btn, col_info = st.columns([1, 1])
+                with col_btn:
                     st.download_button(
-                        label="📥 导出审计报告 (含板块评分)", 
+                        label="📥 立即导出：板块+个股双重评分报告 (CSV)", 
                         data=csv_data, 
-                        file_name=f"Nova_Audit_{selected_sector}_{datetime.now().strftime('%m%d')}.csv",
-                        mime='text/csv'
+                        file_name=f"Nova_Audit_Full_{selected_sector}_{datetime.now().strftime('%m%d_%H%M')}.csv",
+                        mime='text/csv',
+                        use_container_width=True
                     )
-                with col2:
-                    st.info("💡 提示：导出的报告包含板块及个股的三日评分，可再次通过侧边栏导入进行对比。")
+                with col_info:
+                    st.info(f"✅ 报告已就绪：包含 {len(targets)} 个审计标的及板块强度指标。")
