@@ -1,4 +1,5 @@
 pandas
 akshare
-streamlit
 xlsxwriter
+streamlit>=1.41.0
+altair<5.0.0
