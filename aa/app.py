@@ -3,11 +3,12 @@ import akshare as ak
 import streamlit as st
 import json
 import os
+import io
 from datetime import datetime
 
-# ==================== 1. 数据中心 (Vault) ====================
+# ==================== 1. 数据保险箱 (Vault) ====================
 class NovaVault:
-    FILE_PATH = "wangwang_vault.json"
+    FILE_PATH = "wangwang_full_vault.json"
 
     @classmethod
     def save(cls, tag, data):
@@ -24,7 +25,7 @@ class NovaVault:
             except: return {}
         return {}
 
-# ==================== 2. 全板块采集引擎 ====================
+# ==================== 2. 全量引擎 (含导出数据构造) ====================
 class WangWangEngine:
     @staticmethod
     def _safe(val, default=0.0):
@@ -33,114 +34,112 @@ class WangWangEngine:
 
     @staticmethod
     def fetch_all():
-        data = {"macro": {}, "basis": []}
+        data = {"macro": {}, "basis": [], "stocks_detail": []}
         try:
-            # 1. 宏观锚点
+            # 1. 宏观
             pmi_df = ak.macro_china_pmi()
             data["macro"]["PMI"] = WangWangEngine._safe(pmi_df.select_dtypes(include=['number']).iloc[-1, 0], 50.0)
-            
             m1_df = ak.macro_china_m2_yearly()
             valid_m1 = m1_df.dropna(subset=[m1_df.columns[1]])
             data["macro"]["M1"] = WangWangEngine._safe(valid_m1.iloc[-1, 1])
             data["macro"]["M1_prev"] = WangWangEngine._safe(valid_m1.iloc[-2, 1])
-            
             fx_df = ak.fx_spot_quote()
             data["macro"]["USDCNH"] = WangWangEngine._safe(fx_df[fx_df.iloc[:,0].str.contains('USDCNH', na=False)].iloc[0, 1], 7.2)
             
-            # 2. 现货锚点 (沪深300/上证50)
+            # 2. 基差
             spot_df = ak.stock_zh_index_spot_em(symbol="上证系列指数")
             s300 = WangWangEngine._safe(spot_df[spot_df['名称'].str.contains('300')].iloc[0]['最新价'])
             s50 = WangWangEngine._safe(spot_df[spot_df['名称'].str.contains('50')].iloc[0]['最新价'])
-            
-            # 3. 期货基差
-            contracts = [{"code": "IF2603", "price": 4732.8, "spot": s300, "name": "沪深300"},
-                         {"code": "IH2603", "price": 2645.5, "spot": s50, "name": "上证50"}]
+            contracts = [{"code": "IF2603", "name": "沪深300", "spot": s300, "future": 4732.8},
+                         {"code": "IH2603", "name": "上证50", "spot": s50, "future": 2645.5}]
             for c in contracts:
-                basis = round(c['price'] - c['spot'], 2)
-                data["basis"].append({"合约": c['code'], "标的": c['name'], "基差": basis})
+                basis = round(c['future'] - c['spot'], 2)
+                data["basis"].append({"合约": c['code'], "标的": c['name'], "基差": basis, "现货锚点": c['spot']})
+
+            # 3. 汪汪队 20+ 全量个股池
+            avg_basis = sum(b['基差'] for b in data["basis"]) / len(data["basis"])
+            army = {
+                "🛡️ 压舱石 (高股息)": ["中国神华", "中国石油", "长江电力", "工商银行", "中国建筑", "农业银行", "陕西煤业"],
+                "⚔️ 冲锋队 (非银/白马)": ["中信证券", "东方财富", "贵州茅台", "五粮液", "格力电器", "中信建投", "泸州老窖"],
+                "🏗️ 稳增长 (周期)": ["海螺水泥", "万华化学", "三一重工", "紫金矿业", "宝钢股份", "中国中铁", "中国电建"],
+                "📈 守护者 (核心权重)": ["招商银行", "中国平安", "比亚迪", "宁德时代", "美的集团", "兴业银行", "工业富联"]
+            }
+            
+            for sector, stocks in army.items():
+                for s in stocks:
+                    # 动态生成一句话穿透建议
+                    advice = "基本面承压，看汪汪队托底意愿" if data["macro"]["PMI"] < 50 else "跟随大盘趋势"
+                    if avg_basis < -30: advice += " | 贴水严重，具备防御价值"
+                    
+                    data["stocks_detail"].append({
+                        "战队板块": sector,
+                        "股票名称": s,
+                        "穿透建议": advice,
+                        "PMI参考": data["macro"]["PMI"],
+                        "同步时间": datetime.now().strftime("%Y-%m-%d")
+                    })
         except Exception as e:
-            st.sidebar.error(f"接口采集失败: {e}")
+            st.sidebar.error(f"同步失败: {e}")
         return data
 
-# ==================== 3. 汪汪队全板块穿透逻辑 ====================
-def render_full_army(macro, basis_list):
-    st.divider()
-    st.subheader("🚩 汪汪队全板块作战态势")
-    
-    # 获取平均基差情绪
-    avg_basis = sum(b['基差'] for b in basis_list) / len(basis_list) if basis_list else 0
-    
-    # 汪汪队全图谱
-    army = {
-        "🛡️ 压舱石战队 (中特估/高股息)": {
-            "stocks": ["中国神华", "中国石油", "长江电力", "中国建筑", "工商银行"],
-            "logic": "基差贴水时，这类票是汪汪队的防御盾牌。",
-            "risk": "🟢 避风港模式" if avg_basis < -20 else "🟡 溢价震荡"
-        },
-        "⚔️ 冲锋战队 (非银金融/白马)": {
-            "stocks": ["中信证券", "东方财富", "贵州茅台", "五粮液", "格力电器"],
-            "logic": "汇率走强且M1反转时，汪汪队会通过券商发动反攻。",
-            "risk": "🔴 汇率受压" if macro['USDCNH'] > 7.25 else "🟢 动能充足"
-        },
-        "🏗️ 稳增长战队 (顺周期龙头)": {
-            "stocks": ["海螺水泥", "万华化学", "三一重工", "紫金矿业", "宝钢股份"],
-            "logic": "PMI必须站上50，汪汪队护盘这类票才有基本面回旋余地。",
-            "risk": "🔴 PMI收缩压制" if macro['PMI'] < 50 else "🟢 扩张周期"
-        },
-        "📈 指数守护者 (核心ETF权重)": {
-            "stocks": ["招商银行", "中国平安", "比亚迪", "宁德时代", "美的集团"],
-            "logic": "沪深300的核心，基差升水时，汪汪队可能在减缓买入节奏。",
-            "risk": "🟡 情绪过热" if avg_basis > 10 else "🟢 托底区间"
-        }
-    }
-
-    cols = st.columns(2)
-    for i, (name, detail) in enumerate(army.items()):
-        with cols[i % 2]:
-            st.info(f"### {name}")
-            st.metric("作战状态", detail['risk'])
-            st.write(f"**核心标的**：{', '.join(detail['stocks'])}")
-            st.caption(f"**穿透逻辑**：{detail['logic']}")
-            st.progress(40 if "🔴" in detail['risk'] else 80)
-
-# ==================== 4. UI 主控 ====================
+# ==================== 3. 展示与一键导出 ====================
 def main():
-    st.set_page_config(page_title="Nova 汪汪队全维监控", layout="wide")
-    st.header("🛡️ Nova 汪汪队全板块穿透监控 (早晚版)")
+    st.set_page_config(page_title="Nova 汪汪队全案", layout="wide")
+    st.header("🛡️ Nova 汪汪队全板块穿透 & 一键 Excel 导出")
 
     vault = NovaVault.read_all()
     
-    # 侧边栏按钮
-    st.sidebar.header("🕹️ 采样控制")
-    if st.sidebar.button("☀️ 早盘数据采集"):
+    # 侧边栏控制
+    st.sidebar.header("🕹️ 控制中心")
+    if st.sidebar.button("☀️ 同步早盘"):
         NovaVault.save("morning", WangWangEngine.fetch_all()); st.rerun()
-    if st.sidebar.button("🌙 晚盘数据采集"):
+    if st.sidebar.button("🌙 同步晚盘"):
         NovaVault.save("evening", WangWangEngine.fetch_all()); st.rerun()
 
-    mode = st.radio("选择快照：", ["早盘 (Morning)", "晚盘 (Evening)"], horizontal=True)
-    tag = "morning" if "早盘" in mode else "evening"
+    # 导出逻辑
+    if vault:
+        st.sidebar.divider()
+        mode_export = st.sidebar.selectbox("选择导出版本", ["早盘", "晚盘"])
+        tag_export = "morning" if mode_export == "早盘" else "evening"
+        
+        if tag_export in vault:
+            content = vault[tag_export]["content"]
+            
+            # 构造 Excel
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                pd.DataFrame([content["macro"]]).to_excel(writer, sheet_name='宏观数据', index=False)
+                pd.DataFrame(content["basis"]).to_excel(writer, sheet_name='期现基差', index=False)
+                pd.DataFrame(content["stocks_detail"]).to_excel(writer, sheet_name='汪汪队全标的穿透', index=False)
+            
+            st.sidebar.download_button(
+                label="📥 一键导出 Excel",
+                data=output.getvalue(),
+                file_name=f"Nova_汪汪队全穿透_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.ms-excel"
+            )
+
+    # 页面主视图
+    mode = st.radio("查看时段：", ["早盘", "晚盘"], horizontal=True)
+    tag = "morning" if mode == "早盘" else "evening"
     
     if tag in vault:
-        snapshot = vault[tag]
-        cont = snapshot["content"]
-        st.caption(f"📌 数据版本：{snapshot['time']} | 状态：锁定离线浏览")
-
-        # 宏观仪表盘
+        snap = vault[tag]
+        cont = snap["content"]
+        
+        # 仪表盘
         m = cont["macro"]
         
         k1, k2, k3 = st.columns(3)
-        k1.metric("PMI 荣枯线", f"{m['PMI']}", f"{round(m['PMI']-50,2)}")
-        k2.metric("M1 资金活性", f"{m['M1']}%", f"{round(m['M1']-m['M1_prev'],2)}%")
-        k3.metric("离岸人民币 (USDCNH)", f"{m['USDCNH']}")
+        k1.metric("PMI", m['PMI'], f"{round(m['PMI']-50,2)}")
+        k2.metric("M1", f"{m['M1']}%", f"{round(m['M1']-m['M1_prev'],2)}%")
+        k3.metric("USDCNH", m['USDCNH'])
 
-        # 基差数据
-        st.subheader("📉 汪汪队护盘基差锚点")
+        # 数据预览
+        st.subheader("📉 汪汪队作战地图预览")
         
-        if cont["basis"]:
-            st.table(cont["basis"])
-        
-        # 全板块穿透
-        render_full_army(m, cont["basis"])
+        df_display = pd.DataFrame(cont["stocks_detail"])
+        st.dataframe(df_display, use_container_width=True)
     else:
         st.warning(f"👋 Nova，请点击左侧按钮采集【{mode}】数据。")
 
