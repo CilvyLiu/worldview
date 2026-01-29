@@ -4,71 +4,65 @@ import streamlit as st
 import plotly.express as px
 from datetime import datetime
 
-#=======================数据中心=======================#
+# ==================== 1. 数据采集模块 ====================
 class DataCenter:
-    """终极防错版：自适应列名 + 冗余接口切换"""
+    """负责所有宏观与市场数据的抓取（多源冗余 + GDP 动态化）"""
     
     @staticmethod
-    def _safe_get_last(df, col_keywords=['value', '值', '成交额', 'pe', 'yield', '收益率']):
-        if df is None or df.empty:
-            return None
-        # 排除日期和字符串，锁定数值列
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        if not numeric_cols:
-            return None
+    def _get_val(df, key):
+        """内部工具：过滤数值列并自动匹配中英文列名"""
+        if df is None or df.empty: return 0
+        numeric_df = df.select_dtypes(include=['number'])
+        if numeric_df.empty: return 0
         
-        # 优先找关键词匹配的列
-        for kw in col_keywords:
-            for col in numeric_cols:
-                if kw.lower() in col.lower():
-                    series = df[col].dropna()
-                    return float(series.iloc[-1]) if not series.empty else None
-        
-        # 兜底：取最后一个数值列
-        series = df[numeric_cols[-1]].dropna()
-        return float(series.iloc[-1]) if not series.empty else None
+        cols = [c for c in numeric_df.columns if key.lower() in c.lower() or c == '值' or c == '金额']
+        return float(numeric_df[cols[0]].iloc[-1]) if cols else float(numeric_df.iloc[:, -1].iloc[-1])
 
     @staticmethod
     @st.cache_data(ttl=86400)
     def get_dynamic_gdp():
+        """动态计算 GDP：基于去年总量与最新季度增速"""
         try:
-            gdp_df = ak.macro_china_gdp_yearly()
-            val = DataCenter._safe_get_last(gdp_df)
-            return val * 1.05 if val else 1350000
+            # 获取历年总量
+            gdp_year = ak.macro_china_gdp_yearly()
+            base_gdp = DataCenter._get_val(gdp_year, 'value')
+            # 获取最新季度增速 (通常返回如 5.2 代表 5.2%)
+            gdp_q = ak.macro_china_gdp_quarterly()
+            growth = DataCenter._get_val(gdp_q, 'absolute_value') / 100 if not gdp_q.empty else 0.05
+            return base_gdp * (1 + growth)
         except:
-            return 1350000
+            return 1350000 # 2026年保底预估值
 
     @staticmethod
     @st.cache_data(ttl=3600)
     def get_macro_indicators():
         data = {"PMI": None, "M1": None, "M1_prev": None, "USDCNH": None}
         try:
-            # PMI
+            # 1. PMI (制造业)
             pmi_df = ak.macro_china_pmi()
-            data["PMI"] = DataCenter._safe_get_last(pmi_df)
+            data["PMI"] = DataCenter._get_val(pmi_df, 'value')
             
-            # M1
+            # 2. M1 (货币供应量)
             m1_df = ak.macro_china_m2_yearly()
-            if not m1_df.empty:
-                # 寻找 M1 或“值”相关的列
-                col = [c for c in m1_df.columns if '值' in c or 'value' in c]
-                if col:
-                    series = m1_df[col[0]].dropna()
-                    if len(series) >= 2:
-                        data["M1"] = float(series.iloc[-1])
-                        data["M1_prev"] = float(series.iloc[-2])
+            num_df = m1_df.select_dtypes(include=['number'])
+            if not num_df.empty and len(num_df) >= 2:
+                col = num_df.columns[0]
+                data["M1"] = float(num_df[col].iloc[-1])
+                data["M1_prev"] = float(num_df[col].iloc[-2])
             
-            # 汇率 (修复 symbol 报错)
+            # 3. 汇率 (冗余逻辑：先找行情，再找新浪接口)
             try:
+                # 优先：新浪实时外汇
                 fx_df = ak.fx_spot_quote()
-                # 不再依赖 symbol 列名，直接在所有列里找 USDCNH
-                target = fx_df[fx_df.apply(lambda row: row.astype(str).str.contains('USDCNH').any(), axis=1)]
-                if not target.empty:
-                    data["USDCNH"] = DataCenter._safe_get_last(target, ['last', 'p', '价'])
+                row = fx_df[fx_df['symbol'].str.contains('USDCNH', na=False)]
+                data["USDCNH"] = float(row['last'].values[0])
             except:
-                pass
+                # 备选：全球汇率
+                fx_df = ak.currency_latest_sina()
+                row = fx_df[fx_df['symbol'] == 'USDCNH']
+                data["USDCNH"] = float(row['trade'].values[0])
         except Exception as e:
-            st.warning(f"宏观清洗层提示: {e}")
+            st.error(f"宏观数据同步失败: {e}")
         return data
 
     @staticmethod
@@ -77,54 +71,58 @@ class DataCenter:
         val = {"ERP": None, "Buffett": None}
         try:
             # 1. 股债性价比 (ERP)
-            pe_300 = 12.0
+            pe_300 = 12.0 # 默认值
+            # 冗余接口 A: 乐咕 (lg)
             try:
-                # 优先尝试 funddb 接口 (目前最稳)
-                pe_df = ak.index_value_hist_funddb(symbol="沪深300", indicator="市盈率")
-                res = DataCenter._safe_get_last(pe_df, ['pe'])
-                if res: pe_300 = res
+                pe_df = ak.stock_a_indicator_lg(symbol="沪深300")
+                pe_300 = float(pe_df['pe'].iloc[-1])
             except:
-                pass
+                # 冗余接口 B: FundDB
+                try:
+                    pe_df = ak.index_value_hist_funddb(symbol="沪深300", indicator="市盈率")
+                    pe_300 = float(pe_df['pe'].iloc[-1])
+                except: pass
             
-            bond_df = ak.bond_china_yield(start_date="20260101")
-            bond_yield = DataCenter._safe_get_last(bond_df, ['yield', '收益率'])
+            # 国债收益率
+            bond_df = ak.bond_china_yield(start_date="20251201")
+            bond_yield = DataCenter._get_val(bond_df, 'yield')
             
-            if pe_300 and bond_yield:
+            if pe_300 > 0:
                 val["ERP"] = (1 / pe_300) - (bond_yield / 100)
             
-            # 2. 动态巴菲特指标 (修复 stock_a_total_value 缺失)
-            # 使用替代接口获取市场总市值 (A股全市场指标)
+            # 2. 巴菲特指标 (冗余获取全 A 总市值)
+            total_mv = 0
             try:
-                # 替代接口：stock_a_ttm_ex (包含全市场市值数据)
-                mv_df = ak.stock_a_ttm_ex(symbol="all") 
-                # 或者尝试简单接口：直接获取全市场实时行情并求和
-                # total_mv = ak.stock_zh_a_spot_em()['总市值'].sum() / 100000000 # 亿
-                total_mv = mv_df['total_mv'].sum() / 10000 if 'total_mv' in mv_df.columns else 900000
+                # 冗余接口 A: 官方统计
+                mv_df = ak.stock_a_total_value()
+                total_mv = float(mv_df['total_value'].iloc[-1])
             except:
-                # 接口备选方案
-                df_spot = ak.stock_zh_a_spot_em()
-                total_mv = df_spot['总市值'].sum() / 100000000 # 转为亿元
+                # 冗余接口 B: 实时行情汇总 (东财接口，非常稳)
+                spot_df = ak.stock_zh_a_spot_em()
+                total_mv = spot_df['总市值'].sum() / 100000000
                 
-            gdp = DataCenter.get_dynamic_gdp()
-            val["Buffett"] = total_mv / gdp
-            
+            val["Buffett"] = total_mv / DataCenter.get_dynamic_gdp()
         except Exception as e:
-            st.error(f"估值模块关键报错: {e}")
+            st.error(f"估值数据同步失败: {e}")
         return val
 
     @staticmethod
     @st.cache_data(ttl=300)
     def get_cn_wangwang_etf():
+        """汪汪队监控 (基于新浪 ETF 成交量异动)"""
         symbols = {"沪深300": "sh510300", "中证500": "sh510500", "中证1000": "sh512100", "中证2000": "sh563300"}
         flows = {}
         for name, code in symbols.items():
             try:
+                # 使用新浪接口获取 ETF 历史成交额
                 df = ak.fund_etf_hist_sina(symbol=code)
                 num_df = df.select_dtypes(include=['number'])
-                if not num_df.empty and len(df) >= 20:
-                    # 成交额通常是最后一列
-                    target = num_df.iloc[:, -1].dropna()
-                    z_score = (target.iloc[-1] - target.tail(20).mean()) / target.tail(20).std()
+                amt_col = [c for c in num_df.columns if 'amount' in c.lower() or '成交' in c]
+                
+                if not num_df.empty and len(num_df) >= 20:
+                    target = num_df[amt_col[0]].dropna()
+                    recent = target.tail(20)
+                    z_score = (target.iloc[-1] - recent.mean()) / recent.std()
                     flows[name] = round(z_score, 2)
                 else: flows[name] = 0
             except: flows[name] = 0
