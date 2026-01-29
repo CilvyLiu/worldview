@@ -9,72 +9,53 @@ import plotly.graph_objects as go
 import requests
 import re
 
-# =================== 1. 投行级仿人请求引擎 ===================
-def sniper_direct_protocol_sector():
-    """
-    直接穿透：模拟底层 push2 协议获取板块资金流
-    """
-    # 这是东财最底层的实时数据接口，权重极高，不易被封
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
-    
-    params = {
-        "pn": "1",
-        "pz": "50",
-        "po": "1",
-        "np": "1",
-        "ut": "b2884a393a59ad64002292a3e90d46a5", # 使用你之前抓到的令牌
-        "fltt": "2",
-        "invt": "2",
-        "fid": "f62", # 主力净流入排序
-        "fs": "m:90+t:2+f:!50",
-        "fields": "f12,f14,f2,f3,f62,f184"
-    }
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://data.eastmoney.com/bkzj/hy.html",
-        "Accept": "*/*"
-    }
+# =================== 1. 深度修复：增加熔断机制的请求函数 ===================
+def robust_request(func, *args, **kwargs):
+    for i in range(3):
+        try:
+            time.sleep(random.uniform(1.5, 2.5)) 
+            res = func(*args, **kwargs)
+            if res is not None and not (isinstance(res, pd.DataFrame) and res.empty):
+                return res
+        except Exception as e:
+            # 记录错误但不崩溃
+            continue
+    return None
 
-    try:
-        # 增加随机拨号延迟
-        time.sleep(random.uniform(2, 4))
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        
-        # 自动脱掉 jQuery 壳
-        text = response.text
-        if "jQuery" in text:
-            text = text[text.find("(")+1 : text.rfind(")")]
-            
-        data = json.loads(text)
-        df = pd.DataFrame(data['data']['diff'])
-        
-        # 字段重映射
-        df = df.rename(columns={
-            'f14': '名称', 'f12': '代码', 
-            'f3': '今日涨跌幅', 'f62': '主力净流入-净额', 
-            'f184': '主力净流入-净占比'
-        })
-        
-        # 数值清洗
-        for col in ['今日涨跌幅', '主力净流入-净占比']:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-            
-        return df
-    except Exception as e:
-        return None
+# --- Step 1 逻辑重构 ---
+st.header("Step 1: 捕捉【静默流入】异常板块")
 
-# --- 在主程序中使用 ---
-st.header("Step 1: 协议层穿透监控")
-df_sectors = sniper_direct_protocol_sector()
+# 尝试获取数据
+raw_sectors = robust_request(ak.stock_sector_fund_flow_rank, indicator="今日")
 
-if df_sectors is not None:
-    # 自动定标准：涨幅 0.5% - 4%
-    target_sectors = df_sectors[(df_sectors['今日涨跌幅'] > 0.5) & (df_sectors['今日涨跌幅'] < 4.0)]
-    target_sectors = target_sectors.sort_values('主力净流入-净占比', ascending=False).head(10)
-    st.dataframe(target_sectors[['名称', '今日涨跌幅', '主力净流入-净占比']], use_container_width=True)
+# 【熔断保护】：如果接口彻底挂了，生成一个空结构防止 NameError
+if raw_sectors is None:
+    st.error("🔴 接口握手失败 (WAF 封锁)。建议切换手机热点。")
+    # 创建一个空的 DataFrame 结构，保证后续代码不崩
+    df_sectors = pd.DataFrame(columns=['名称', '今日涨跌幅', '主力净流入-净占比'])
+    target_sectors = df_sectors # 赋值为空，防止下游报错
 else:
-    st.error("🚨 协议层握手失败。建议：1. 开启手机热点更换 IP；2. 等待 15 分钟待 WAF 自动解锁。")
+    df_sectors = raw_sectors.copy()
+    # 自动清洗字段名
+    df_sectors.columns = [c.replace('今日','').replace('涨跌幅','今日涨跌幅') for c in df_sectors.columns]
+    
+    # 强制转换数值，处理可能存在的 '-' 或空值
+    df_sectors['今日涨跌幅'] = pd.to_numeric(df_sectors['今日涨跌幅'], errors='coerce').fillna(0)
+    df_sectors['主力净流入-净占比'] = pd.to_numeric(df_sectors['主力净流入-净占比'], errors='coerce').fillna(0)
+    
+    # 【自动定标准】：寻找 0.5% - 4% 的静默区
+    target_sectors = df_sectors[(df_sectors['今日涨跌幅'] > 0.5) & (df_sectors['今日涨跌幅'] < 4.0)]
+    
+    if target_sectors.empty:
+        target_sectors = df_sectors.sort_values('主力净流入-净占比', ascending=False).head(10)
+    else:
+        target_sectors = target_sectors.sort_values('主力净流入-净占比', ascending=False).head(10)
+
+# 只有在有数据时才显示表格
+if not target_sectors.empty:
+    st.dataframe(target_sectors[['名称', '主力净流入-净占比', '今日涨跌幅']], use_container_width=True)
+else:
+    st.info("💡 等待数据源恢复中... 请尝试刷新页面或更换网络。")
 
 # =================== 2. 核心审计类 (逻辑加固) ===================
 class StrategicSniffer:
