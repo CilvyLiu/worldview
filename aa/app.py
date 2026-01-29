@@ -5,13 +5,13 @@ import numpy as np
 import requests
 from datetime import datetime
 
-# =================== 1. 协议穿透引擎 (Nova 专属：Push2 稳健版) ===================
+# =================== 1. 协议穿透引擎 (Nova 专属：Push2 稳健连接版) ===================
 
 class MarketConnector:
-    """处理与行情推系统的握手，防止连接重置"""
+    """处理与行情系统的握手，防止连接重置"""
     def __init__(self):
         self.session = requests.Session()
-        # 注入投行级伪装，防止被远程端切断
+        # 深度伪装，防止 RemoteDisconnected 异常
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://data.eastmoney.com/",
@@ -19,21 +19,21 @@ class MarketConnector:
             "Connection": "keep-alive"
         }
 
-    def get_data(self, url, params):
+    def fetch(self, url, params):
         try:
-            # 使用 Session 维持长连接，减少 RemoteDisconnected 概率
+            # 维持 Session 长连接，降低被服务器主动切断的概率
             resp = self.session.get(url, params=params, headers=self.headers, timeout=15)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            st.error(f"🏛️ 投行专线握手异常 (Push2): {e}")
+            st.warning(f"🏛️ 投行专线尝试重新连接中... ({e})")
             return None
 
-# 初始化全局连接器
+# 全局初始化连接器
 connector = MarketConnector()
 
 def get_market_sectors_dynamic():
-    """板块侦测：采用 Push2 动态协议"""
+    """板块侦测：通过 Push2 协议获取"""
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": "1", "pz": "100", "po": "1", "np": "1",
@@ -42,19 +42,18 @@ def get_market_sectors_dynamic():
         "fs": "m:90+t:2+f:!50", 
         "fields": "f12,f14,f3,f62,f184"
     }
-    data = connector.get_data(url, params)
+    data = connector.fetch(url, params)
     if data and 'data' in data and 'diff' in data:
         df = pd.DataFrame(data['data']['diff']).rename(columns={
             'f12': 'ID', 'f14': '板块名称', 'f3': '今日涨幅', 
             'f62': '主力净额', 'f184': '主力占比'
         })
-        # 换算单位为亿
         df['板块评分'] = pd.to_numeric(df['主力净额'], errors='coerce') / 100000000
         return df.sort_values(by='板块评分', ascending=False)
     return None
 
 def get_stock_penetration(sector_id):
-    """个股侦测：穿透 Push2 协议层"""
+    """个股穿透：支持 Push2 长连接协议"""
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "pn": "1", "pz": "100", "po": "1", "np": "1",
@@ -63,7 +62,7 @@ def get_stock_penetration(sector_id):
         "fs": f"b:{sector_id}",
         "fields": "f12,f14,f2,f3,f62,f164,f174" 
     }
-    data = connector.get_data(url, params)
+    data = connector.fetch(url, params)
     if data and 'data' in data and 'diff' in data:
         df = pd.DataFrame(data['data']['diff']).rename(columns={
             'f12': '代码', 'f14': '名称', 'f2': '价格', 'f3': '今日涨幅',
@@ -74,7 +73,7 @@ def get_stock_penetration(sector_id):
         return df
     return None
 
-# =================== 2. 扫货痕迹审计 (核心算法禁止删减) ===================
+# =================== 2. 扫货痕迹审计 (Nova 核心算法) ===================
 
 class StrategicSniffer:
     def get_real_trade_dates(self, count=3):
@@ -84,7 +83,6 @@ class StrategicSniffer:
         except: return [datetime.now().strftime("%Y%m%d")]
 
     def analyze_silent_trace(self, df_tick):
-        """Nova 核心审计算法"""
         if df_tick is None or df_tick.empty: return 0
         df_tick['price'] = pd.to_numeric(df_tick['price'], errors='coerce')
         df_tick['成交额'] = pd.to_numeric(df_tick['成交额'], errors='coerce')
@@ -105,8 +103,8 @@ st.set_page_config(page_title="Sniffer Pro V12.0", layout="wide")
 sniffer = StrategicSniffer()
 dates = sniffer.get_real_trade_dates(3)
 
-st.title("🏛️ Sniffer Pro V12.0 - 动态全向侦测与复盘系统")
-st.caption(f"尊贵的 Nova，欢迎使用。当前协议状态：Push2 Session 长连接已激活。")
+st.title("🏛️ Sniffer Pro V12.0 - 动态全向侦测系统")
+st.caption(f"Nova 专属节点 | 协议状态: Push2 Session-Persistence 已启动")
 
 # --- Step 1: 实时板块侦测 ---
 st.header("Step 1: 全市场板块资金侦测")
@@ -116,20 +114,10 @@ if df_all_sectors is not None:
     st.sidebar.header("📂 审计配置")
     st.sidebar.info(f"审计日期范围: {', '.join(dates)}")
     
-    st.dataframe(
-        df_all_sectors, 
-        use_container_width=True,
-        column_config={"板块评分": st.column_config.NumberColumn(format="%.2f 亿 🟢")}
-    )
+    st.dataframe(df_all_sectors, use_container_width=True)
     
-    # 【导出按钮 1】
-    csv_step1 = df_all_sectors.to_csv(index=False).encode('utf_8_sig')
-    st.download_button(
-        label="📥 导出全市场板块资金侦测报告",
-        data=csv_step1,
-        file_name=f"Nova_Market_Sectors_{datetime.now().strftime('%m%d')}.csv",
-        mime='text/csv'
-    )
+    csv_s1 = df_all_sectors.to_csv(index=False).encode('utf_8_sig')
+    st.download_button("📥 导出板块资金报告", data=csv_s1, file_name=f"Sectors_{datetime.now().strftime('%m%d')}.csv")
     
     st.divider()
     sector_map = df_all_sectors.set_index('板块名称')['ID'].to_dict()
@@ -139,8 +127,8 @@ if df_all_sectors is not None:
         sid = sector_map[selected_sector_name]
         sec_info = df_all_sectors[df_all_sectors['板块名称'] == selected_sector_name].iloc[0]
         
-        # --- Step 2: 个股穿透侦测 ---
-        st.header(f"Step 2: {selected_sector_name} - 个股穿透侦测")
+        # --- Step 2: 个股穿透 ---
+        st.header(f"Step 2: {selected_sector_name} - 个股侦测")
         df_stocks = get_stock_penetration(sid)
         
         if df_stocks is not None:
@@ -148,24 +136,15 @@ if df_all_sectors is not None:
                 (df_stocks['5日主力'] > 500) & (df_stocks['今日涨幅'] < 1.5), "💎 疑似静默扫货", "正常波动"
             )
             st.dataframe(df_stocks, use_container_width=True)
+            
+            csv_s2 = df_stocks.to_csv(index=False).encode('utf_8_sig')
+            st.download_button(f"📥 导出 {selected_sector_name} 明细", data=csv_s2, file_name=f"Stocks_{selected_sector_name}.csv")
 
-            # 【导出按钮 2】
-            csv_step2 = df_stocks.to_csv(index=False).encode('utf_8_sig')
-            st.download_button(
-                label=f"📥 导出 {selected_sector_name} 个股明细报告",
-                data=csv_step2,
-                file_name=f"Nova_Stocks_{selected_sector_name}_{datetime.now().strftime('%m%d')}.csv",
-                mime='text/csv'
-            )
-
-            # --- Step 3: 深度审计与综合导出 ---
+            # --- Step 3: 深度复盘 ---
             st.divider()
-            st.header("Step 3: 三日深度审计与综合导出")
-            targets = st.multiselect(
-                "勾选标的执行深度 Tick 审计:", 
-                df_stocks['名称'].tolist(),
-                default=df_stocks[df_stocks['侦测状态']=="💎 疑似静默扫货"]['名称'].tolist()[:3]
-            )
+            st.header("Step 3: 三日深度审计")
+            targets = st.multiselect("勾选标的执行深度审计:", df_stocks['名称'].tolist(), 
+                                     default=df_stocks[df_stocks['侦测状态']=="💎 疑似静默扫货"]['名称'].tolist()[:3])
             
             if targets:
                 reports = []
@@ -175,37 +154,23 @@ if df_all_sectors is not None:
                 for idx, (s_idx, row) in enumerate(selected_df.iterrows()):
                     c_str = str(row['代码']).zfill(6)
                     f_code = f"{'sh' if c_str.startswith('6') else 'sz'}{c_str}"
+                    report_row = {"标的": row['名称'], "代码": c_str, "今日涨幅%": row['今日涨幅']}
                     
-                    report_row = {
-                        "板块名称": selected_sector_name,
-                        "板块今日强度(亿)": round(sec_info['板块评分'], 2),
-                        "标的名称": row['名称'], "代码": c_str,
-                        "今日涨幅%": row['今日涨幅'], "5日主力(万)": row['5日主力']
-                    }
-                    
-                    total_s = 0
-                    for d_idx, date in enumerate(dates):
+                    ts = 0
+                    for d in dates:
                         try:
-                            df_t = ak.stock_zh_a_tick_163(symbol=f_code, date=date)
+                            df_t = ak.stock_zh_a_tick_163(symbol=f_code, date=d)
                             s = sniffer.analyze_silent_trace(df_t)
                         except: s = 0
-                        report_row[f"T-{d_idx}({date})审计分"] = s
-                        total_s += s
+                        report_row[f"{d}审计"] = s
+                        ts += s
                     
-                    report_row["审计综合总分"] = total_s
+                    report_row["审计综合总分"] = ts
                     reports.append(report_row)
                     p_bar.progress((idx + 1) / len(selected_df))
                 
                 df_rep = pd.DataFrame(reports)
-                st.subheader("📊 最终复盘矩阵")
                 st.dataframe(df_rep.style.background_gradient(subset=['审计综合总分'], cmap='RdYlGn'), use_container_width=True)
-
-                # 【导出按钮 3】
-                csv_step3 = df_rep.to_csv(index=False).encode('utf_8_sig')
-                st.download_button(
-                    label=f"📥 导出 {selected_sector_name} 三日深度审计综合报告", 
-                    data=csv_step3,
-                    file_name=f"Nova_Audit_Final_{selected_sector_name}_{datetime.now().strftime('%m%d')}.csv",
-                    mime='text/csv',
-                    use_container_width=True
-                )
+                
+                csv_s3 = df_rep.to_csv(index=False).encode('utf_8_sig')
+                st.download_button("📥 导出深度复盘综合报告", data=csv_s3, file_name="Final_Audit.csv", use_container_width=True)
