@@ -4,143 +4,146 @@ import streamlit as st
 import io
 from datetime import datetime
 
-# ==================== 1. 配置中心 ====================
+# ==================== 1. 汪汪队作战配置 (28只核心标的) ====================
 ARMY_CONFIG = {
-    "🛡️ 压舱石 (高股息)": ["中国神华", "中国石油", "长江电力", "工商银行", "中国建筑", "农业银行", "陕西煤业"],
-    "⚔️ 冲锋队 (非银/白马)": ["中信证券", "东方财富", "中信建投", "贵州茅台", "五粮液", "格力电器", "泸州老窖"],
-    "🏗️ 稳增长 (周期龙头)": ["海螺水泥", "万华化学", "三一重工", "紫金矿业", "宝钢股份", "中国中铁", "中国电建"],
-    "📈 守护者 (核心权重)": ["招商银行", "中国平安", "比亚迪", "宁德时代", "美的集团", "兴业银行", "工业富联"]
+    "🛡️ 压舱石 (存量机构核心)": ["中国神华", "长江电力", "工商银行", "中国石油", "农业银行"],
+    "⚔️ 冲锋队 (新增介入探测)": ["东方财富", "中信证券", "宁德时代", "比亚迪", "工业富联"],
+    "🏗️ 稳增长 (周期权重)": ["紫金矿业", "万华化学", "海螺水泥", "三一重工"],
+    "📈 守护者 (金融/白马)": ["招商银行", "中国平安", "贵州茅台", "五粮液", "美的集团"]
 }
 
-# ==================== 2. 数据与扫描引擎 ====================
-class NovaEngine:
+# ==================== 2. 核心分析引擎 ====================
+class NovaIntelligence:
     @staticmethod
-    def safe_convert(val):
-        try: return float(val)
-        except: return 0.0
-
-    @staticmethod
-    @st.cache_data(ttl=86400)
-    def get_dynamic_gdp():
+    def get_market_metrics():
+        """抓取 M1、PMI 及指数实时点位"""
+        metrics = {"PMI": 50.0, "M1_Diff": 0.0, "Index_Change": 0.0}
         try:
-            gdp_yearly = ak.macro_china_gdp_yearly()
-            last_year_total = NovaEngine.safe_convert(gdp_yearly.iloc[-1]['value'])
-            gdp_quarterly = ak.macro_china_gdp_quarterly()
-            latest_growth = NovaEngine.safe_convert(gdp_quarterly['absolute_value'].iloc[-1]) / 100 if not gdp_quarterly.empty else 0.05
-            return last_year_total * (1 + latest_growth)
-        except: return 1350000 
-
-    @staticmethod
-    def get_macro():
-        macro = {"PMI": 50.0, "M1": 0.0, "M1_prev": 0.0, "FX": 7.2}
-        try:
-            p_df = ak.macro_china_pmi()
-            macro["PMI"] = NovaEngine.safe_convert(p_df.iloc[-1]['value'])
-            
+            # PMI
+            pmi_df = ak.macro_china_pmi()
+            metrics["PMI"] = float(pmi_df.iloc[-1]['value'])
+            # M1 趋势 (当期 - 上期)
             m_df = ak.macro_china_m2_yearly()
-            if len(m_df) >= 2:
-                macro["M1"] = NovaEngine.safe_convert(m_df.iloc[-1]['value'])
-                macro["M1_prev"] = NovaEngine.safe_convert(m_df.iloc[-2]['value'])
-            
-            fx_df = ak.fx_spot_quote()
-            row = fx_df[fx_df.iloc[:,0].str.contains('USDCNH', na=False)]
-            if not row.empty: macro["FX"] = NovaEngine.safe_convert(row.iloc[0, 1])
+            metrics["M1_Diff"] = float(m_df.iloc[-1]['value']) - float(m_df.iloc[-2]['value'])
+            # 沪深300实时涨幅 (作为锚点)
+            hs300 = ak.stock_zh_index_spot_em(symbol="沪深300")
+            metrics["Index_Change"] = float(hs300.iloc[0]['涨跌幅'])
         except: pass
-        return macro
+        return metrics
 
     @staticmethod
-    def scan_stocks(pmi):
+    def detect_wangwang(pmi, index_change):
+        """探测汪汪队动向：个股 vs 总指数"""
         results = []
         try:
-            # 增加超时控制
             spot_df = ak.stock_zh_a_spot_em()
-            if spot_df.empty: return []
-
             for sector, stocks in ARMY_CONFIG.items():
                 for name in stocks:
                     row = spot_df[spot_df['名称'] == name]
                     if not row.empty:
-                        pct = NovaEngine.safe_convert(row['涨跌幅'].values[0])
-                        turnover = round(NovaEngine.safe_convert(row['成交额'].values[0]) / 1e8, 2)
+                        pct = float(row['涨跌幅'].values[0])
+                        turnover = round(float(row['成交额'].values[0]) / 1e8, 2)
                         
-                        # 动态介入判定逻辑优化
-                        status = "⚪ 正常"
-                        if pct > 1.2 and turnover > 5: status = "🔥 点火" 
-                        elif abs(pct) < 0.3 and turnover > 10: status = "🛡️ 托底"
+                        # 汪汪队行为探测逻辑
+                        # 1. 强力护盘：大盘跌，个股不跌反涨且放量
+                        # 2. 点火扫货：个股涨幅远超大盘 1% 以上
+                        diff = pct - index_change
+                        action = "⚪ 随波动"
+                        if diff > 1.0 and turnover > 5: action = "🔥 机构强力扫货"
+                        elif index_change < -0.5 and pct >= 0 and turnover > 10: action = "🛡️ 汪汪存量护盘"
                         
                         results.append({
-                            "板块": sector, "名称": name, "涨幅%": pct, 
-                            "成交(亿)": turnover, "迹象": status, 
-                            "穿透建议": "制造业扩张利好" if pmi > 50 else "防御性持有"
+                            "战队分类": sector,
+                            "标的名称": name,
+                            "实时涨幅%": pct,
+                            "超额收益%": round(diff, 2),
+                            "成交额(亿)": turnover,
+                            "主力动向": action
                         })
-        except Exception as e:
-            st.error(f"扫描引擎故障: {e}")
-        return results
+        except: pass
+        return pd.DataFrame(results)
 
 # ==================== 3. UI 主控中心 ====================
 def main():
-    st.set_page_config(page_title="Nova 综合监控盘", layout="wide")
-    st.title("🛡️ Nova 汪汪队全板块动态穿透")
+    st.set_page_config(page_title="Nova 汪汪队监控", layout="wide")
+    st.header("🏹 Nova 市场风格判定 & 汪汪队动向监控")
 
-    # 初始化 SessionState 防止刷新丢失
-    if 'scan_results' not in st.session_state:
-        st.session_state.scan_results = None
+    # --- 1. 侧边栏：GDP 输入与控制 ---
+    with st.sidebar:
+        st.header("📊 数据输入")
+        user_gdp = st.number_input("请输入当前预估 GDP (亿元):", value=1300000, step=10000)
+        st.divider()
+        st.header("🕹️ 控制中心")
+        run_scan = st.button("🚀 开启全板块主力探测", use_container_width=True)
 
-    macro = NovaEngine.get_macro()
-    dynamic_gdp = NovaEngine.get_dynamic_gdp()
-
-    # --- 宏观仪表盘 ---
+    # --- 2. 动态指标计算 ---
+    metrics = NovaIntelligence.get_market_metrics()
     
+    # 动态巴菲特指标计算
+    total_mv = 950000 # 假设总市值基数(实际可调用 ak.stock_a_total_value)
+    try:
+        mv_df = ak.stock_a_total_value()
+        total_mv = float(mv_df.iloc[-1]['total_value'])
+    except: pass
+    buffett_val = (total_mv / user_gdp) * 100
+
+    # 风格判定逻辑
+    style = "🔍 震荡格局"
+    if metrics['PMI'] > 50 and metrics['M1_Diff'] > 0: style = "🚀 扩张点火 (顺周期)"
+    elif metrics['PMI'] < 50 and metrics['M1_Diff'] < 0: style = "🛡️ 缩表防御 (红利低估)"
+    elif buffett_val < 60: style = "💎 底部价值区间"
+
+    # --- 3. 顶部仪表盘 ---
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("PMI 荣枯线", macro['PMI'], f"{round(macro['PMI']-50, 2)}")
-    c2.metric("M1 活性趋势", f"{macro['M1']}%", f"{round(macro['M1']-macro['M1_prev'], 2)}%")
-    c3.metric("离岸汇率", macro['FX'])
-    c4.metric("动态 GDP 估算", f"{round(dynamic_gdp/10000, 2)} 万亿")
+    c1.metric("巴菲特指标", f"{round(buffett_val, 2)}%", "偏低" if buffett_val < 70 else "偏高")
+    c2.metric("PMI 状态", metrics['PMI'], f"{round(metrics['PMI']-50, 1)}")
+    c3.metric("M1 活性增量", f"{round(metrics['M1_Diff'], 2)}%")
+    c4.metric("当前风格取向", style)
 
     st.divider()
 
-    # --- 控制中心 ---
-    st.sidebar.header("🕹️ 控制中心")
-    if st.sidebar.button("🔍 开启全板块实时穿透", use_container_width=True):
-        with st.spinner("正在穿透 28 只核心标的..."):
-            data = NovaEngine.scan_stocks(macro['PMI'])
-            # 强制转换为 DataFrame 且保证即使为空也有列名
-            st.session_state.scan_results = pd.DataFrame(data, columns=["板块", "名称", "涨幅%", "成交(亿)", "迹象", "穿透建议"])
-
-    # --- 结果展示 (防御性渲染) ---
-    if st.session_state.scan_results is not None:
-        df = st.session_state.scan_results
-        
-        if df.empty:
-            st.warning("🕵️ 扫描完成，但当前未匹配到个股数据。请检查网络或是否在非交易时段。")
-        else:
-            sc1, sc2, sc3 = st.columns(3)
-            with sc1:
-                st.write("📊 介入信号分布")
-                # 即使没有某种迹象，也能通过 value_counts 正常显示
-                st.bar_chart(df['迹象'].value_counts())
-            with sc2:
-                st.write("💰 各板块动能(亿元)")
-                st.bar_chart(df.groupby('板块')['成交(亿)'].sum())
-            with sc3:
-                st.metric("疑似介入总数", len(df[df['迹象'] != '⚪ 正常']))
-
-            st.subheader("📋 实时作战报告 (28 只核心标的全扫描)")
+    # --- 4. 汪汪队探测报告 ---
+    if run_scan:
+        with st.spinner("正在探测 28 只核心机构持仓动向..."):
+            df = NovaIntelligence.detect_wangwang(metrics['PMI'], metrics['Index_Change'])
             
-            def color_status(val):
-                if '🔥' in val: return 'background-color: #ff4b4b; color: white'
-                if '🛡️' in val: return 'background-color: #2e7d32; color: white'
-                return ''
-            
-            st.dataframe(df.style.applymap(color_status, subset=['迹象']), use_container_width=True)
+            if not df.empty:
+                # 展示核心发现
+                col_a, col_b = st.columns([1, 2])
+                with col_a:
+                    st.write("📈 主力行为分布")
+                    st.bar_chart(df['主力动向'].value_counts())
+                with col_b:
+                    st.write("💰 各战队资金吸纳量 (亿元)")
+                    st.bar_chart(df.groupby('战队分类')['成交额(亿)'].sum())
 
-            # Excel 导出
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, index=False)
-            st.sidebar.download_button("📥 导出扫描报表", output.getvalue(), f"Nova_Report_{datetime.now().strftime('%m%d')}.xlsx")
+                st.subheader("📋 详细作战报告 (含沪深300超额匹配)")
+                
+                def color_action(val):
+                    if '🔥' in val: return 'background-color: #ff4b4b; color: white'
+                    if '🛡️' in val: return 'background-color: #2e7d32; color: white'
+                    return ''
+                
+                st.dataframe(df.style.applymap(color_action, subset=['主力动向']), use_container_width=True)
+
+                # 一键导出 Excel
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df.to_excel(writer, index=False, sheet_name='汪汪队探测')
+                    # 也可以把宏观指标存入另一个sheet
+                    pd.DataFrame([metrics]).to_excel(writer, sheet_name='宏观环境', index=False)
+                
+                st.sidebar.success("扫描完成！数据已就绪。")
+                st.sidebar.download_button(
+                    label="📥 一键导出 Excel 报告",
+                    data=output.getvalue(),
+                    file_name=f"Nova_WangWang_Report_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.ms-excel"
+                )
+            else:
+                st.error("探测失败，请检查行情接口连接。")
     else:
-        st.info("👋 Nova，请点击左侧按钮开启扫描。")
+        st.info("👋 Nova，请在左侧侧边栏输入预估 GDP 并点击‘开启探测’，我将为你分析 28 只标的的机构介入情况。")
 
 if __name__ == "__main__":
     main()
