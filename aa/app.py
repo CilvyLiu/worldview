@@ -79,29 +79,36 @@ class StrategicSniffer:
 
 # =================== 3. 动态侦测 UI ===================
 
-st.set_page_config(page_title="Sniffer Pro V11.0", layout="wide")
+st.set_page_config(page_title="Sniffer Pro V12.0", layout="wide")
 sniffer = StrategicSniffer()
 dates = sniffer.get_real_trade_dates(3)
 
-st.title("🏛️ Sniffer Pro V11.0 - 动态全向侦测系统")
+st.title("🏛️ Sniffer Pro V12.0 - 动态全向侦测与复盘系统")
 
 # --- Step 1: 实时板块侦测 ---
 st.header("Step 1: 全市场板块资金侦测")
 df_all_sectors = get_market_sectors_dynamic()
 
 if df_all_sectors is not None:
-    # 侧边栏辅助功能
     st.sidebar.header("📂 审计配置")
     st.sidebar.info(f"审计日期范围: {', '.join(dates)}")
     
-    # 展示板块看板
     st.dataframe(
         df_all_sectors, 
         use_container_width=True,
         column_config={"板块评分": st.column_config.NumberColumn(format="%.2f 亿 🟢")}
     )
     
-    # 动态选择板块
+    # 【导出按钮 1】
+    csv_step1 = df_all_sectors.to_csv(index=False).encode('utf_8_sig')
+    st.download_button(
+        label="📥 导出全市场板块资金侦测报告",
+        data=csv_step1,
+        file_name=f"Nova_Market_Sectors_{datetime.now().strftime('%m%d')}.csv",
+        mime='text/csv'
+    )
+    
+    st.divider()
     sector_map = df_all_sectors.set_index('板块名称')['ID'].to_dict()
     selected_sector_name = st.selectbox("🎯 选定待审计板块:", ["请选择探测目标"] + list(sector_map.keys()))
 
@@ -110,16 +117,23 @@ if df_all_sectors is not None:
         sec_info = df_all_sectors[df_all_sectors['板块名称'] == selected_sector_name].iloc[0]
         
         # --- Step 2: 个股穿透侦测 ---
-        st.divider()
         st.header(f"Step 2: {selected_sector_name} - 个股穿透侦测")
         df_stocks = get_stock_penetration(sid)
         
         if df_stocks is not None:
-            # 标记静默吸筹标的
             df_stocks['侦测状态'] = np.where(
                 (df_stocks['5日主力'] > 500) & (df_stocks['今日涨幅'] < 1.5), "💎 疑似静默扫货", "正常波动"
             )
             st.dataframe(df_stocks, use_container_width=True)
+
+            # 【导出按钮 2】
+            csv_step2 = df_stocks.to_csv(index=False).encode('utf_8_sig')
+            st.download_button(
+                label=f"📥 导出 {selected_sector_name} 个股明细报告",
+                data=csv_step2,
+                file_name=f"Nova_Stocks_{selected_sector_name}_{datetime.now().strftime('%m%d')}.csv",
+                mime='text/csv'
+            )
 
             # --- Step 3: 深度审计与综合导出 ---
             st.divider()
@@ -139,7 +153,6 @@ if df_all_sectors is not None:
                     c_str = str(row['代码']).zfill(6)
                     f_code = f"{'sh' if c_str.startswith('6') else 'sz'}{c_str}"
                     
-                    # 关键：整合板块评分到个股报告
                     report_row = {
                         "板块名称": selected_sector_name,
                         "板块今日强度(亿)": round(sec_info['板块评分'], 2),
@@ -162,14 +175,14 @@ if df_all_sectors is not None:
                 
                 df_rep = pd.DataFrame(reports)
                 st.subheader("📊 最终复盘矩阵")
-                st.dataframe(df_rep, use_container_width=True)
+                st.dataframe(df_rep.style.background_gradient(subset=['审计综合总分'], cmap='RdYlGn'), use_container_width=True)
 
-                # 导出资产
-                csv_data = df_rep.to_csv(index=False).encode('utf_8_sig')
+                # 【导出按钮 3】
+                csv_step3 = df_rep.to_csv(index=False).encode('utf_8_sig')
                 st.download_button(
-                    label=f"📥 导出 {selected_sector_name} 综合审计报告", 
-                    data=csv_data,
-                    file_name=f"Nova_Dynamic_{selected_sector_name}_{datetime.now().strftime('%m%d')}.csv",
+                    label=f"📥 导出 {selected_sector_name} 三日深度审计综合报告", 
+                    data=csv_step3,
+                    file_name=f"Nova_Audit_Final_{selected_sector_name}_{datetime.now().strftime('%m%d')}.csv",
                     mime='text/csv',
                     use_container_width=True
                 )
