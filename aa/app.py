@@ -6,21 +6,42 @@ from datetime import datetime
 
 # ==================== 1. 数据采集模块 ====================
 class DataCenter:
-    """负责所有宏观与市场数据的抓取"""
+    """负责所有宏观与市场数据的抓取（已实现 GDP 动态化）"""
     
+    @staticmethod
+    @st.cache_data(ttl=86400) # GDP这类宏观基数数据每日更新一次即可
+    def get_dynamic_gdp():
+        """从官方数据动态估算当前年化 GDP"""
+        try:
+            # 1. 获取历年年度 GDP 总量 (亿元)
+            gdp_yearly_df = ak.macro_china_gdp_yearly()
+            last_year_total = float(gdp_yearly_df.iloc[-1]['value'])
+            
+            # 2. 获取最新季度 GDP 增长率 (进行动态平滑)
+            gdp_quarterly_df = ak.macro_china_gdp_quarterly()
+            # 取最近一个季度的同比增速，如果没有则默认为 5% (0.05)
+            latest_growth = float(gdp_quarterly_df['absolute_value'].iloc[-1]) / 100 if not gdp_quarterly_df.empty else 0.05
+            
+            # 3. 动态计算估算值：去年基数 * (1 + 最新增速)
+            dynamic_gdp = last_year_total * (1 + latest_growth)
+            return dynamic_gdp
+        except Exception as e:
+            # 兜底方案：如果接口失效，返回一个2026年的合理预估常数
+            return 1350000 
+
     @staticmethod
     @st.cache_data(ttl=3600)
     def get_macro_indicators():
         data = {"PMI": None, "M1": None, "M1_prev": None, "USDCNH": None}
         try:
-            # PMI 数据
+            # PMI 数据 (制造业)
             pmi_df = ak.macro_china_pmi()
             data["PMI"] = pmi_df['value'].iloc[-1]
             
             # M1 数据 (获取近两期对比趋势)
             m1_df = ak.macro_china_m2_yearly()
             data["M1"] = m1_df['value'].iloc[-1]
-            data["M1_prev"] = m1_df['value'].iloc[-2] # 用于判断趋势
+            data["M1_prev"] = m1_df['value'].iloc[-2] # 用于趋势 Delta 计算
             
             # 汇率 (USDCNH)
             fx = ak.fx_spot_quote()
@@ -34,22 +55,26 @@ class DataCenter:
     def get_valuation():
         val = {"ERP": None, "Buffett": None}
         try:
-            # 股债性价比 (ERP)
+            # 1. 股债性价比 (ERP)
             pe_df = ak.stock_a_indicator_lg(symbol="沪深300")
             pe_300 = pe_df['pe'].iloc[-1] if not pe_df.empty else 0
             
-            bond_df = ak.bond_china_yield(start_date="20251201")
+            # 这里的日期建议设为最近的一个月
+            bond_df = ak.bond_china_yield(start_date="20260101")
             bond_yield = bond_df['yield'].iloc[-1] if not bond_df.empty else 0
             
             if pe_300 > 0:
-                # bond_yield通常为百分比，如2.5代表2.5%
+                # bond_yield 为 2.5 这种格式，代表 2.5%
                 val["ERP"] = (1 / pe_300) - (bond_yield / 100)
             
-            # 巴菲特指标 (总市值/GDP)
+            # 2. 动态巴菲特指标 (总市值 / 动态预测 GDP)
             mv_df = ak.stock_a_total_value()
-            total_mv = mv_df['total_value'].iloc[-1] # 亿
-            gdp_2026_est = 1350000  # 2026年预估GDP
-            val["Buffett"] = total_mv / gdp_2026_est
+            total_mv = mv_df['total_value'].iloc[-1] # 亿元
+            
+            # 调用上面的动态 GDP 接口
+            dynamic_gdp = DataCenter.get_dynamic_gdp()
+            val["Buffett"] = total_mv / dynamic_gdp
+            
         except Exception as e:
             st.error(f"估值数据同步失败: {e}")
         return val
@@ -57,6 +82,7 @@ class DataCenter:
     @staticmethod
     @st.cache_data(ttl=300)
     def get_cn_wangwang_etf():
+        # CN汪汪 ETF 监控: 300, 500, 1000, 2000
         symbols = {"沪深300": "sh510300", "中证500": "sh510500", "中证1000": "sh512100", "中证2000": "sh563300"}
         flows = {}
         for name, code in symbols.items():
@@ -71,7 +97,6 @@ class DataCenter:
             except:
                 flows[name] = 0
         return flows
-
 # ==================== 2. 策略引擎模块 ====================
 class StrategyEngine:
     @staticmethod
