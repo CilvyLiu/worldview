@@ -5,6 +5,7 @@ import numpy as np
 import requests
 import random
 import time
+import json
 from datetime import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -47,13 +48,16 @@ class NovaRobustConnector:
             resp = self.session.get(url, params=params, headers=self.get_dynamic_headers(), timeout=15)
             # 提取 JSON 数据 (处理 jQuery 回调包裹)
             text = resp.text
+            if not text or "(" not in text:
+                return None
             json_str = text[text.find("(")+1 : text.rfind(")")]
-            import json
             return json.loads(json_str)
-        except Exception as e:
+        except Exception:
             return None
 
-connector = NovaRobustConnector()
+# 全局实例化连接器
+if 'connector' not in st.session_state:
+    st.session_state.connector = NovaRobustConnector()
 
 def get_market_sectors_dynamic():
     """板块侦测：采用强化版穿透协议"""
@@ -65,7 +69,7 @@ def get_market_sectors_dynamic():
         "fs": "m:90+t:2+f:!50",
         "fields": "f12,f14,f3,f62,f184"
     }
-    data = connector.fetch(url, params)
+    data = st.session_state.connector.fetch(url, params)
     if data and 'data' in data and 'diff' in data:
         df = pd.DataFrame(data['data']['diff']).rename(columns={
             'f12': 'ID', 'f14': '板块名称', 'f3': '今日涨幅', 
@@ -74,7 +78,6 @@ def get_market_sectors_dynamic():
         df['板块评分'] = pd.to_numeric(df['主力净额'], errors='coerce') / 100000000
         return df.sort_values(by='板块评分', ascending=False)
     else:
-        st.warning("📊 正在切换备用数据链路，请稍候...")
         return None
 
 def get_stock_penetration(sector_id):
@@ -87,7 +90,7 @@ def get_stock_penetration(sector_id):
         "fs": f"b:{sector_id}",
         "fields": "f12,f14,f2,f3,f62,f164,f174"
     }
-    data = connector.fetch(url, params)
+    data = st.session_state.connector.fetch(url, params)
     if data and 'data' in data and 'diff' in data:
         df = pd.DataFrame(data['data']['diff']).rename(columns={
             'f12': '代码', 'f14': '名称', 'f2': '价格', 'f3': '今日涨幅',
@@ -131,9 +134,14 @@ st.caption(f"Nova 专属模式 | 已激活随机指纹对抗协议")
 
 # --- Step 1 ---
 st.header("Step 1: 全市场板块资金侦测")
-df_all = get_market_sectors_dynamic()
 
-if df_all is not None:
+# 增加手动刷新按钮，避免自动刷新的无限循环
+if st.button("📡 执行全市场扫描"):
+    with st.spinner("正在穿透投行专线..."):
+        st.session_state.df_all = get_market_sectors_dynamic()
+
+if 'df_all' in st.session_state and st.session_state.df_all is not None:
+    df_all = st.session_state.df_all
     st.dataframe(df_all, use_container_width=True)
     csv_s1 = df_all.to_csv(index=False).encode('utf_8_sig')
     st.download_button("📥 导出板块报告", data=csv_s1, file_name="Sectors.csv")
@@ -158,25 +166,26 @@ if df_all is not None:
                                      default=df_s[df_s['侦测状态']=="💎 疑似静默扫货"]['名称'].tolist()[:2])
             
             if targets:
-                reports = []
-                p_bar = st.progress(0)
-                selected = df_s[df_s['名称'].isin(targets)]
-                for idx, (s_idx, row) in enumerate(selected.iterrows()):
-                    c = str(row['代码']).zfill(6)
-                    f = f"{'sh' if c.startswith('6') else 'sz'}{c}"
-                    r = {"名称": row['名称'], "审计得分": 0}
-                    ts = 0
-                    for d in dates:
-                        try:
-                            d_t = ak.stock_zh_a_tick_163(symbol=f, date=d)
-                            s = sniffer.analyze_silent_trace(d_t)
-                        except: s = 0
-                        ts += s
-                    r["审计得分"] = ts
-                    reports.append(r)
-                    p_bar.progress((idx + 1) / len(selected))
-                
-                st.table(pd.DataFrame(reports))
-                st.download_button("📥 导出报告", pd.DataFrame(reports).to_csv(index=False).encode('utf_8_sig'), "Audit.csv")
+                if st.button("🔍 执行深度算法审计"):
+                    reports = []
+                    p_bar = st.progress(0)
+                    selected = df_s[df_s['名称'].isin(targets)]
+                    for idx, (s_idx, row) in enumerate(selected.iterrows()):
+                        c = str(row['代码']).zfill(6)
+                        f = f"{'sh' if c.startswith('6') else 'sz'}{c}"
+                        r = {"名称": row['名称'], "审计得分": 0}
+                        ts = 0
+                        for d in dates:
+                            try:
+                                d_t = ak.stock_zh_a_tick_163(symbol=f, date=d)
+                                s = sniffer.analyze_silent_trace(d_t)
+                            except: s = 0
+                            ts += s
+                        r["审计得分"] = ts
+                        reports.append(r)
+                        p_bar.progress((idx + 1) / len(selected))
+                    
+                    st.table(pd.DataFrame(reports))
+                    st.download_button("📥 导出报告", pd.DataFrame(reports).to_csv(index=False).encode('utf_8_sig'), "Audit.csv")
 else:
-    st.info("🔄 正在绕过防火墙，请点击右侧侧边栏 'Clear Cache' 或稍后再试。")
+    st.info("🔄 接口暂无响应。请点击上方按钮重新建立握手，或稍后再试。")
