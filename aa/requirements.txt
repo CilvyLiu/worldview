@@ -1,6 +1,5 @@
-streamlit==1.27.0
-pandas==2.1.1
-akshare==1.0.90
-plotly==5.17.0
-numpy==1.25.1
-openpyxl==3.1.2
+streamlit>=1.27.0
+pandas>=2.1.0
+akshare>=1.1.0
+plotly
+openpyxl
