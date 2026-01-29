@@ -1,160 +1,133 @@
 import pandas as pd
 import akshare as ak
 import streamlit as st
-import json
-import os
 import io
 from datetime import datetime
 
-# ==================== 1. 数据保险箱 (Vault) ====================
-class NovaVault:
-    FILE_PATH = "wangwang_full_vault.json"
+# ==================== 1. 深度穿透逻辑配置 ====================
+ARMY_CONFIG = {
+    "🛡️ 压舱石 (高股息/中特估)": {
+        "stocks": {"中国神华": "601088", "中国石油": "601857", "长江电力": "600900", "工商银行": "601398", "中国建筑": "601668", "农业银行": "601288", "陕西煤业": "601225"},
+        "trigger": "Basis", # 靠基差驱动
+        "desc": "当大盘基差负值扩大，此处常有救灾资金。"
+    },
+    "⚔️ 冲锋队 (非银金融/券商)": {
+        "stocks": {"中信证券": "600030", "东方财富": "300059", "中信建投": "601066", "贵州茅台": "600519", "五粮液": "000858", "格力电器": "000651", "泸州老窖": "000568"},
+        "trigger": "M1", # 靠资金活性驱动
+        "desc": "汪汪队点火风向标。成交额若破百亿，介入信号最强。"
+    },
+    "🏗️ 稳增长 (周期龙头)": {
+        "stocks": {"海螺水泥": "600585", "万华化学": "600309", "三一重工": "600031", "紫金矿业": "601899", "宝钢股份": "600019", "中国中铁": "601390", "中国电建": "601669"},
+        "trigger": "PMI", # 靠经济预期驱动
+        "desc": "若PMI收缩但股价逆势横盘，说明有资金在死守。"
+    },
+    "📈 守护者 (核心权重/ETF)": {
+        "stocks": {"招商银行": "600036", "中国平安": "601318", "比亚迪": "002594", "宁德时代": "300750", "美的集团": "000333", "兴业银行": "601166", "工业富联": "601138"},
+        "trigger": "FX", # 靠汇率驱动
+        "desc": "汇率波动剧烈时的‘定海神针’，护盘必选。"
+    }
+}
 
-    @classmethod
-    def save(cls, tag, data):
-        vault = cls.read_all()
-        vault[tag] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "content": data}
-        with open(cls.FILE_PATH, "w", encoding="utf-8") as f:
-            json.dump(vault, f, ensure_ascii=False, indent=4)
-
-    @classmethod
-    def read_all(cls):
-        if os.path.exists(cls.FILE_PATH):
-            try:
-                with open(cls.FILE_PATH, "r", encoding="utf-8") as f: return json.load(f)
-            except: return {}
-        return {}
-
-# ==================== 2. 全量引擎 (加固版) ====================
-class WangWangEngine:
+# ==================== 2. 全板块动态扫描引擎 ====================
+class WangWangScanner:
     @staticmethod
-    def _safe(val, default=0.0):
+    def scan_now():
+        results = []
         try:
-            if pd.isna(val) or val is None: return default
-            return float(val)
-        except: return default
-
-    @staticmethod
-    def fetch_all():
-        # [加固] 预设结构，彻底杜绝 KeyError
-        data = {
-            "macro": {"PMI": 50.0, "M1": 0.0, "M1_prev": 0.0, "USDCNH": 7.2}, 
-            "basis": [], 
-            "stocks_detail": []
-        }
-        try:
-            # 1. 宏观 - PMI
+            # A. 宏观动态
             pmi_df = ak.macro_china_pmi()
-            if not pmi_df.empty:
-                data["macro"]["PMI"] = WangWangEngine._safe(pmi_df.select_dtypes(include=['number']).iloc[-1, 0], 50.0)
+            pmi = float(pmi_df.select_dtypes(include=['number']).iloc[-1, 0])
+            fx_df = ak.fx_spot_quote()
+            fx = float(fx_df[fx_df.iloc[:,0].str.contains('USDCNH')].iloc[0, 1])
             
-            # 2. 宏观 - M1
-            m1_df = ak.macro_china_m2_yearly()
-            valid_m1 = m1_df.dropna(subset=[m1_df.columns[1]])
-            if len(valid_m1) >= 2:
-                data["macro"]["M1"] = WangWangEngine._safe(valid_m1.iloc[-1, 1])
-                data["macro"]["M1_prev"] = WangWangEngine._safe(valid_m1.iloc[-2, 1])
+            # B. 实时行情全扫描
+            st.write("🔄 正在扫描全板块 28 只核心标的实时盘口...")
+            spot_df = ak.stock_zh_a_spot_em()
             
-            # 3. [加固修复] 宏观 - 汇率
-            try:
-                fx_df = ak.fx_spot_quote()
-                # 模糊搜索包含 USDCNH 的行
-                row = fx_df[fx_df.iloc[:,0].str.contains('USDCNH', na=False, case=False)]
-                if not row.empty:
-                    data["macro"]["USDCNH"] = WangWangEngine._safe(row.iloc[0, 1], 7.2)
-                else:
-                    # 备选逻辑：找包含“人民币”字样的行
-                    row_alt = fx_df[fx_df.iloc[:,0].str.contains('人民币', na=False)]
-                    if not row_alt.empty:
-                        data["macro"]["USDCNH"] = WangWangEngine._safe(row_alt.iloc[0, 1], 7.2)
-            except:
-                st.sidebar.warning("汇率实时同步受限，使用参考值")
-            
-            # 4. 基差
-            spot_df = ak.stock_zh_index_spot_em(symbol="上证系列指数")
-            s300 = WangWangEngine._safe(spot_df[spot_df['名称'].str.contains('300')].iloc[0]['最新价'], 4000.0)
-            s50 = WangWangEngine._safe(spot_df[spot_df['名称'].str.contains('50')].iloc[0]['最新价'], 2500.0)
-            
-            contracts = [{"code": "IF2603", "name": "沪深300", "spot": s300, "future": 4732.8},
-                         {"code": "IH2603", "name": "上证50", "spot": s50, "future": 2645.5}]
-            for c in contracts:
-                basis = round(c['future'] - c['spot'], 2)
-                data["basis"].append({"合约": c['code'], "标刻": c['name'], "基差": basis, "现货": c['spot']})
+            for sector, cfg in ARMY_CONFIG.items():
+                for name, code in cfg["stocks"].items():
+                    row = spot_df[spot_df['名称'] == name]
+                    if not row.empty:
+                        price = row['最新价'].values[0]
+                        pct = row['涨跌幅'].values[0]
+                        turnover = row['成交额'].values[0] / 100000000 # 换算成亿元
+                        
+                        # C. 判定介入迹象 (核心逻辑)
+                        # 逻辑：如果涨跌幅 > 0.5% 且成交额在该板块前列，定义为“疑似介入”
+                        intervention = "⚪ 暂无明显迹象"
+                        if pct > 0.5 and turnover > 5: # 简单阈值：涨幅>0.5%且成交过5亿
+                            intervention = "🔥 疑似介入点火"
+                        elif pct < -1 and turnover > 10:
+                            intervention = "⚠️ 承压放量"
+                        elif abs(pct) < 0.2 and turnover > 8:
+                            intervention = "🛡️ 强力托底中"
 
-            # 5. 汪汪队全量个股
-            avg_basis = sum(b['基差'] for b in data["basis"]) / len(data["basis"]) if data["basis"] else 0
-            army = {
-                "🛡️ 压舱石 (高股息)": ["中国神华", "中国石油", "长江电力", "工商银行", "中国建筑", "农业银行", "陕西煤业"],
-                "⚔️ 冲锋队 (非银/白马)": ["中信证券", "东方财富", "贵州茅台", "五粮液", "格力电器", "中信建投", "泸州老窖"],
-                "🏗️ 稳增长 (周期)": ["海螺水泥", "万华化学", "三一重工", "紫金矿业", "宝钢股份", "中国中铁", "中国电建"],
-                "📈 守护者 (核心权重)": ["招商银行", "中国平安", "比亚迪", "宁德时代", "美的集团", "兴业银行", "工业富联"]
-            }
-            
-            for sector, stocks in army.items():
-                for s in stocks:
-                    advice = "基本面承压，看汪汪队托底意愿" if data["macro"]["PMI"] < 50 else "跟随大盘趋势"
-                    if avg_basis < -30: advice += " | 贴水严重，具备防御价值"
-                    data["stocks_detail"].append({
-                        "战队板块": sector, "股票名称": s, "穿透建议": advice,
-                        "PMI参考": data["macro"]["PMI"], "同步时间": datetime.now().strftime("%Y-%m-%d")
-                    })
+                        # D. 差异化建议
+                        if "周期" in sector: advice = "PMI驱动" if pmi > 50 else "逆周期托底"
+                        elif "冲锋" in sector: advice = "攻击性买入" if pct > 0 else "弹药补给中"
+                        else: advice = "被动指数管理"
+
+                        results.append({
+                            "作战板块": sector,
+                            "股票名称": name,
+                            "最新价": price,
+                            "涨跌幅%": pct,
+                            "成交额(亿)": round(turnover, 2),
+                            "介入迹象分析": intervention,
+                            "板块底层逻辑": advice,
+                            "参考指标": f"PMI:{pmi} / FX:{fx}"
+                        })
         except Exception as e:
-            st.sidebar.error(f"引擎运行异常: {e}")
-        return data
+            st.error(f"扫描中断: {e}")
+        return results
 
-# ==================== 3. 主程序 ====================
+# ==================== 3. Nova 控制中心 ====================
 def main():
-    st.set_page_config(page_title="Nova 汪汪队", layout="wide")
-    st.header("🛡️ Nova 汪汪队全板块穿透 & 一键 Excel 导出")
+    st.set_page_config(page_title="Nova 汪汪队全板块扫描", layout="wide")
+    st.header("🚩 Nova 汪汪队全板块动态扫描 (实时数据版)")
 
-    vault = NovaVault.read_all()
-    
-    st.sidebar.header("🕹️ 控制中心")
-    if st.sidebar.button("☀️ 同步早盘"):
-        NovaVault.save("morning", WangWangEngine.fetch_all()); st.rerun()
-    if st.sidebar.button("🌙 同步晚盘"):
-        NovaVault.save("evening", WangWangEngine.fetch_all()); st.rerun()
+    if st.sidebar.button("🔍 开始全板块深度扫描"):
+        scan_data = WangWangScanner.scan_now()
+        st.session_state.scan_results = scan_data
 
-    if vault:
-        st.sidebar.divider()
-        mode_export = st.sidebar.selectbox("选择导出版本", ["早盘", "晚盘"])
-        tag_export = "morning" if mode_export == "早盘" else "evening"
+    if "scan_results" in st.session_state:
+        df = pd.DataFrame(st.session_state.scan_results)
+
+        # 数据可视化统计
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("📊 板块介入度统计")
+            inter_counts = df['介入迹象分析'].value_counts()
+            st.bar_chart(inter_counts)
+        with c2:
+            st.subheader("💰 今日交火最剧烈标的")
+            top_active = df.sort_values(by="成交额(亿)", ascending=False).head(5)
+            st.table(top_active[['股票名称', '涨跌幅%', '成交额(亿)', '介入迹象分析']])
+
+        st.divider()
+        st.subheader("📋 全量作战地图 (已按板块穿透)")
         
-        if tag_export in vault:
-            content = vault[tag_export]["content"]
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                pd.DataFrame([content.get("macro", {})]).to_excel(writer, sheet_name='宏观数据', index=False)
-                pd.DataFrame(content.get("basis", [])).to_excel(writer, sheet_name='期现基差', index=False)
-                pd.DataFrame(content.get("stocks_detail", [])).to_excel(writer, sheet_name='汪汪队穿透', index=False)
-            
-            st.sidebar.download_button(
-                label="📥 一键导出 Excel",
-                data=output.getvalue(),
-                file_name=f"Nova_WangWang_{datetime.now().strftime('%m%d')}.xlsx",
-                mime="application/vnd.ms-excel"
-            )
-
-    mode = st.radio("查看时段：", ["早盘", "晚盘"], horizontal=True)
-    tag = "morning" if mode == "早盘" else "evening"
-    
-    if tag in vault:
-        cont = vault[tag]["content"]
-        m = cont.get("macro", {"PMI": 50, "M1": 0, "M1_prev": 0, "USDCNH": 7.2})
+        # 实时表格着色处理
+        def color_intervention(val):
+            if '🔥' in val: return 'background-color: #ff4b4b; color: white'
+            if '🛡️' in val: return 'background-color: #2e7d32; color: white'
+            return ''
         
-        # 仪表盘
-        k1, k2, k3 = st.columns(3)
-        k1.metric("PMI", m.get('PMI', 50), f"{round(m.get('PMI', 50)-50, 2)}")
-        k2.metric("M1", f"{m.get('M1', 0)}%", f"{round(m.get('M1', 0)-m.get('M1_prev', 0), 2)}%")
-        # 使用 .get 保护，彻底解决 KeyError
-        k3.metric("USDCNH", m.get('USDCNH', 7.2))
+        st.dataframe(df.style.applymap(color_intervention, subset=['介入迹象分析']), use_container_width=True)
 
-        st.subheader("📉 汪汪队作战地图预览")
-        df_display = pd.DataFrame(cont.get("stocks_detail", []))
-        if not df_display.empty:
-            st.dataframe(df_display, use_container_width=True)
+        # 一键导出 Excel (包含所有动态字段)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, sheet_name='全板块扫描报告', index=False)
+        
+        st.sidebar.download_button(
+            label="📥 导出今日全扫描 Excel",
+            data=output.getvalue(),
+            file_name=f"Nova_WangWang_Scan_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+            mime="application/vnd.ms-excel"
+        )
     else:
-        st.warning(f"👋 Nova，请点击左侧按钮采集数据。")
+        st.info("Nova，点击侧边栏‘开始全板块深度扫描’，我将为你实时穿透 28 只核心股的介入情况。")
 
 if __name__ == "__main__":
     main()
