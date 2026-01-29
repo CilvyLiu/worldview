@@ -6,27 +6,32 @@ from datetime import datetime
 
 # ==================== 1. 数据采集模块 ====================
 class DataCenter:
-    """负责所有宏观与市场数据的抓取（已实现 GDP 动态化）"""
+    """负责所有宏观与市场数据的抓取（适配 2026 最新接口标准）"""
     
     @staticmethod
-    @st.cache_data(ttl=86400) # GDP这类宏观基数数据每日更新一次即可
+    def _get_col_value(df, preferred_cols=['value', '值', '成交额']):
+        """辅助函数：自动识别 DataFrame 中的数值列"""
+        for col in preferred_cols:
+            if col in df.columns:
+                return df[col]
+        # 如果都没有，取第二列（通常第一列是日期/索引）
+        return df.iloc[:, 1]
+
+    @staticmethod
+    @st.cache_data(ttl=86400)
     def get_dynamic_gdp():
-        """从官方数据动态估算当前年化 GDP"""
         try:
-            # 1. 获取历年年度 GDP 总量 (亿元)
             gdp_yearly_df = ak.macro_china_gdp_yearly()
-            last_year_total = float(gdp_yearly_df.iloc[-1]['value'])
+            col = DataCenter._get_col_value(gdp_yearly_df)
+            last_year_total = float(col.iloc[-1])
             
-            # 2. 获取最新季度 GDP 增长率 (进行动态平滑)
             gdp_quarterly_df = ak.macro_china_gdp_quarterly()
-            # 取最近一个季度的同比增速，如果没有则默认为 5% (0.05)
-            latest_growth = float(gdp_quarterly_df['absolute_value'].iloc[-1]) / 100 if not gdp_quarterly_df.empty else 0.05
+            # 兼容处理：尝试获取绝对值列或数值列
+            q_col = DataCenter._get_col_value(gdp_quarterly_df, ['absolute_value', '值'])
+            latest_growth = float(q_col.iloc[-1]) / 100 if not gdp_quarterly_df.empty else 0.05
             
-            # 3. 动态计算估算值：去年基数 * (1 + 最新增速)
-            dynamic_gdp = last_year_total * (1 + latest_growth)
-            return dynamic_gdp
-        except Exception as e:
-            # 兜底方案：如果接口失效，返回一个2026年的合理预估常数
+            return last_year_total * (1 + latest_growth)
+        except:
             return 1350000 
 
     @staticmethod
@@ -34,20 +39,22 @@ class DataCenter:
     def get_macro_indicators():
         data = {"PMI": None, "M1": None, "M1_prev": None, "USDCNH": None}
         try:
-            # PMI 数据 (制造业)
+            # PMI 数据
             pmi_df = ak.macro_china_pmi()
-            data["PMI"] = pmi_df['value'].iloc[-1]
+            pmi_col = DataCenter._get_col_value(pmi_df)
+            data["PMI"] = float(pmi_col.iloc[-1])
             
-            # M1 数据 (获取近两期对比趋势)
+            # M1 数据
             m1_df = ak.macro_china_m2_yearly()
-            data["M1"] = m1_df['value'].iloc[-1]
-            data["M1_prev"] = m1_df['value'].iloc[-2] # 用于趋势 Delta 计算
+            m1_col = DataCenter._get_col_value(m1_df)
+            data["M1"] = float(m1_col.iloc[-1])
+            data["M1_prev"] = float(m1_col.iloc[-2])
             
             # 汇率 (USDCNH)
             fx = ak.fx_spot_quote()
             data["USDCNH"] = fx.loc[fx['symbol']=='USDCNH','last'].values[0]
         except Exception as e:
-            st.error(f"宏观数据同步失败: {e}")
+            st.warning(f"宏观部分接口波动: {e}")
         return data
 
     @staticmethod
@@ -56,41 +63,44 @@ class DataCenter:
         val = {"ERP": None, "Buffett": None}
         try:
             # 1. 股债性价比 (ERP)
-            pe_df = ak.stock_a_indicator_lg(symbol="沪深300")
-            pe_300 = pe_df['pe'].iloc[-1] if not pe_df.empty else 0
+            # 修复：不再依赖 lg 接口，改用 funddb 接口获取沪深 300 估值，更稳
+            try:
+                # 获取沪深300历史市盈率
+                pe_df = ak.index_value_hist_funddb(symbol="沪深300", indicator="市盈率")
+                pe_300 = float(pe_df['pe'].iloc[-1])
+            except:
+                # 最后的兜底：如果 funddb 也挂了，给一个中性 PE
+                pe_300 = 12.0
             
-            # 这里的日期建议设为最近的一个月
             bond_df = ak.bond_china_yield(start_date="20260101")
-            bond_yield = bond_df['yield'].iloc[-1] if not bond_df.empty else 0
+            bond_col = DataCenter._get_col_value(bond_df, ['yield', '收益率'])
+            bond_yield = float(bond_col.iloc[-1])
             
-            if pe_300 > 0:
-                # bond_yield 为 2.5 这种格式，代表 2.5%
-                val["ERP"] = (1 / pe_300) - (bond_yield / 100)
+            val["ERP"] = (1 / pe_300) - (bond_yield / 100)
             
-            # 2. 动态巴菲特指标 (总市值 / 动态预测 GDP)
+            # 2. 动态巴菲特指标
             mv_df = ak.stock_a_total_value()
-            total_mv = mv_df['total_value'].iloc[-1] # 亿元
+            mv_col = DataCenter._get_col_value(mv_df, ['total_value', '总市值'])
+            total_mv = float(mv_col.iloc[-1])
             
-            # 调用上面的动态 GDP 接口
-            dynamic_gdp = DataCenter.get_dynamic_gdp()
-            val["Buffett"] = total_mv / dynamic_gdp
+            val["Buffett"] = total_mv / DataCenter.get_dynamic_gdp()
             
         except Exception as e:
-            st.error(f"估值数据同步失败: {e}")
+            st.error(f"估值模块关键报错: {e}")
         return val
 
     @staticmethod
     @st.cache_data(ttl=300)
     def get_cn_wangwang_etf():
-        # CN汪汪 ETF 监控: 300, 500, 1000, 2000
         symbols = {"沪深300": "sh510300", "中证500": "sh510500", "中证1000": "sh512100", "中证2000": "sh563300"}
         flows = {}
         for name, code in symbols.items():
             try:
                 df = ak.fund_etf_hist_sina(symbol=code)
+                amt_col = DataCenter._get_col_value(df, ['amount', '成交额'])
                 if len(df) >= 20:
-                    recent = df['amount'].tail(20)
-                    z_score = (df['amount'].iloc[-1] - recent.mean()) / recent.std()
+                    recent = amt_col.tail(20)
+                    z_score = (amt_col.iloc[-1] - recent.mean()) / recent.std()
                     flows[name] = round(z_score, 2)
                 else:
                     flows[name] = 0
