@@ -5,56 +5,80 @@ import plotly.express as px
 from datetime import datetime
 
 # ==================== 1. 数据采集模块 ====================
+import pandas as pd
+import akshare as ak
+import streamlit as st
+
 class DataCenter:
-    """负责所有宏观与市场数据的抓取（适配 2026 最新接口标准）"""
+    """终极防错版：自动过滤日期列 + 索引越界防护"""
     
     @staticmethod
-    def _get_col_value(df, preferred_cols=['value', '值', '成交额']):
-        """辅助函数：自动识别 DataFrame 中的数值列"""
-        for col in preferred_cols:
-            if col in df.columns:
-                return df[col]
-        # 如果都没有，取第二列（通常第一列是日期/索引）
-        return df.iloc[:, 1]
+    def _safe_get_last(df, col_keywords=['value', '值', '成交额', 'pe', 'yield', '收益率']):
+        """
+        核心防错逻辑：
+        1. 检查 df 是否为空
+        2. 排除掉 '日期' 或 'date' 类型的列，锁定纯数值列
+        3. 找到最后一个非空有效值
+        """
+        if df is None or df.empty:
+            return None
+        
+        # 排除掉包含日期或字符串的列，只锁定数值列 (int/float)
+        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        
+        if not numeric_cols:
+            return None
+        
+        # 优先匹配关键词列名（不区分大小写）
+        for kw in col_keywords:
+            for col in numeric_cols:
+                if kw.lower() in col.lower():
+                    # 确保剔除 NaN 值后再取最后一个
+                    series = df[col].dropna()
+                    return float(series.iloc[-1]) if not series.empty else None
+        
+        # 如果没匹配到关键词，保守取最后一个数值列的最后一个值
+        series = df[numeric_cols[-1]].dropna()
+        return float(series.iloc[-1]) if not series.empty else None
 
     @staticmethod
     @st.cache_data(ttl=86400)
     def get_dynamic_gdp():
         try:
-            gdp_yearly_df = ak.macro_china_gdp_yearly()
-            col = DataCenter._get_col_value(gdp_yearly_df)
-            last_year_total = float(col.iloc[-1])
-            
-            gdp_quarterly_df = ak.macro_china_gdp_quarterly()
-            # 兼容处理：尝试获取绝对值列或数值列
-            q_col = DataCenter._get_col_value(gdp_quarterly_df, ['absolute_value', '值'])
-            latest_growth = float(q_col.iloc[-1]) / 100 if not gdp_quarterly_df.empty else 0.05
-            
-            return last_year_total * (1 + latest_growth)
+            gdp_df = ak.macro_china_gdp_yearly()
+            val = DataCenter._safe_get_last(gdp_df)
+            return val * 1.05 if val else 1350000
         except:
-            return 1350000 
+            return 1350000
 
     @staticmethod
     @st.cache_data(ttl=3600)
     def get_macro_indicators():
         data = {"PMI": None, "M1": None, "M1_prev": None, "USDCNH": None}
         try:
-            # PMI 数据
+            # PMI
             pmi_df = ak.macro_china_pmi()
-            pmi_col = DataCenter._get_col_value(pmi_df)
-            data["PMI"] = float(pmi_col.iloc[-1])
+            data["PMI"] = DataCenter._safe_get_last(pmi_df)
             
-            # M1 数据
+            # M1 (需取最后两个值做对比)
             m1_df = ak.macro_china_m2_yearly()
-            m1_col = DataCenter._get_col_value(m1_df)
-            data["M1"] = float(m1_col.iloc[-1])
-            data["M1_prev"] = float(m1_col.iloc[-2])
+            if not m1_df.empty:
+                numeric_df = m1_df.select_dtypes(include=['number'])
+                if not numeric_df.empty and len(numeric_df) >= 2:
+                    col = numeric_df.columns[0]
+                    series = numeric_df[col].dropna()
+                    if len(series) >= 2:
+                        data["M1"] = float(series.iloc[-1])
+                        data["M1_prev"] = float(series.iloc[-2])
             
-            # 汇率 (USDCNH)
+            # USDCNH 汇率
             fx = ak.fx_spot_quote()
-            data["USDCNH"] = fx.loc[fx['symbol']=='USDCNH','last'].values[0]
+            if not fx.empty:
+                val = fx.loc[fx['symbol']=='USDCNH', 'last']
+                if not val.empty:
+                    data["USDCNH"] = float(val.values[0])
         except Exception as e:
-            st.warning(f"宏观部分接口波动: {e}")
+            st.warning(f"宏观清洗层提示: {e}")
         return data
 
     @staticmethod
@@ -63,28 +87,28 @@ class DataCenter:
         val = {"ERP": None, "Buffett": None}
         try:
             # 1. 股债性价比 (ERP)
-            # 修复：不再依赖 lg 接口，改用 funddb 接口获取沪深 300 估值，更稳
+            pe_300 = 12.0 # 预设中性 PE
             try:
-                # 获取沪深300历史市盈率
+                # 尝试 funddb 获取沪深300 PE
                 pe_df = ak.index_value_hist_funddb(symbol="沪深300", indicator="市盈率")
-                pe_300 = float(pe_df['pe'].iloc[-1])
+                res = DataCenter._safe_get_last(pe_df, ['pe'])
+                if res: pe_300 = res
             except:
-                # 最后的兜底：如果 funddb 也挂了，给一个中性 PE
-                pe_300 = 12.0
+                pass
             
+            # 国债收益率
             bond_df = ak.bond_china_yield(start_date="20260101")
-            bond_col = DataCenter._get_col_value(bond_df, ['yield', '收益率'])
-            bond_yield = float(bond_col.iloc[-1])
+            bond_yield = DataCenter._safe_get_last(bond_df, ['yield', '收益率'])
             
-            val["ERP"] = (1 / pe_300) - (bond_yield / 100)
+            if pe_300 and bond_yield:
+                val["ERP"] = (1 / pe_300) - (bond_yield / 100)
             
             # 2. 动态巴菲特指标
             mv_df = ak.stock_a_total_value()
-            mv_col = DataCenter._get_col_value(mv_df, ['total_value', '总市值'])
-            total_mv = float(mv_col.iloc[-1])
-            
-            val["Buffett"] = total_mv / DataCenter.get_dynamic_gdp()
-            
+            total_mv = DataCenter._safe_get_last(mv_df, ['total_value', '总市值'])
+            gdp = DataCenter.get_dynamic_gdp()
+            if total_mv and gdp:
+                val["Buffett"] = total_mv / gdp
         except Exception as e:
             st.error(f"估值模块关键报错: {e}")
         return val
@@ -97,13 +121,16 @@ class DataCenter:
         for name, code in symbols.items():
             try:
                 df = ak.fund_etf_hist_sina(symbol=code)
-                amt_col = DataCenter._get_col_value(df, ['amount', '成交额'])
-                if len(df) >= 20:
-                    recent = amt_col.tail(20)
-                    z_score = (amt_col.iloc[-1] - recent.mean()) / recent.std()
-                    flows[name] = round(z_score, 2)
-                else:
-                    flows[name] = 0
+                # 提取成交额列 (一般是最后一列)
+                numeric_df = df.select_dtypes(include=['number'])
+                if not numeric_df.empty and len(df) >= 20:
+                    target_series = numeric_df.iloc[:, -1].dropna()
+                    if len(target_series) >= 20:
+                        recent = target_series.tail(20)
+                        z_score = (target_series.iloc[-1] - recent.mean()) / recent.std()
+                        flows[name] = round(z_score, 2)
+                    else: flows[name] = 0
+                else: flows[name] = 0
             except:
                 flows[name] = 0
         return flows
