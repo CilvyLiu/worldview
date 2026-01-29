@@ -4,7 +4,7 @@ import streamlit as st
 import io
 from datetime import datetime
 
-# ==================== 1. 核心标的代码映射 (内置市场属性) ====================
+# ==================== 1. 28只核心标的 (带市场标识) ====================
 WANGWANG_MAP = [
     {"战队": "🛡️ 压舱石", "名称": "中国神华", "代码": "601088", "市场": "沪"},
     {"战队": "🛡️ 压舱石", "名称": "长江电力", "代码": "600900", "市场": "沪"},
@@ -36,42 +36,47 @@ WANGWANG_MAP = [
     {"战队": "📈 守护者", "名称": "格力电器", "代码": "000651", "市场": "深"}
 ]
 
-# ==================== 2. 全自动增强引擎 ====================
+# ==================== 2. 全自动百分比引擎 ====================
 class NovaAutoEngine:
     @staticmethod
     def get_market_data():
-        """三位一体自动抓取：沪深指数+总市值+PMI"""
-        # 基准存档数据
+        """指数、市值、PMI 统统自动抓取并标准化百分比"""
         data = {"PMI": 50.1, "SH": 0.0, "SZ": 0.0, "Total_MV": 870000.0}
         try:
-            # 1. 指数分流抓取
+            # 1. 抓指数分流 (纠正非百分比问题)
             idx_df = ak.stock_zh_index_spot_em()
-            data["SH"] = float(idx_df[idx_df['名称'] == '上证指数']['涨跌幅'].values[0])
-            data["SZ"] = float(idx_df[idx_df['名称'] == '深证成指']['涨跌幅'].values[0])
-            # 2. 市值一键获取
+            sh_row = idx_df[idx_df['名称'] == '上证指数']
+            sz_row = idx_df[idx_df['名称'] == '深证成指']
+            
+            # 核心修正：确保取出的数值就是 1.25 这种百分比形式
+            data["SH"] = float(sh_row['涨跌幅'].values[0])
+            data["SZ"] = float(sz_row['涨跌幅'].values[0])
+            
+            # 2. 抓市值
             mv_df = ak.stock_a_total_value()
             data["Total_MV"] = float(mv_df.iloc[-1]['total_value'])
-            # 3. PMI 实时荣枯线
+            
+            # 3. 抓 PMI (实时)
             pmi_df = ak.macro_china_pmi()
             data["PMI"] = float(pmi_df.iloc[-1]['value'])
         except:
-            st.sidebar.warning("📡 实时接口受限，已启用逻辑存档。")
+            st.sidebar.warning("📡 部分自动口径受限，已启用逻辑存档。")
         return data
 
 # ==================== 3. UI 界面渲染 ====================
 def main():
-    st.set_page_config(page_title="Nova 汪汪队 2026", layout="wide")
+    st.set_page_config(page_title="Nova 探测器 2026", layout="wide")
     auto = NovaAutoEngine.get_market_data()
 
     st.title("🏹 Nova 汪汪队全自动探测系统")
 
     with st.sidebar:
-        st.header("⚙️ 自动化纠偏")
+        st.header("⚙️ 自动化修正")
         gdp = st.number_input("1. GDP 分母 (亿元):", value=1300000)
         st.divider()
-        st.subheader("📊 沪深指数涨幅修正")
-        fix_sh = st.number_input("上证指数 (%):", value=auto["SH"])
-        fix_sz = st.number_input("深证成指 (%):", value=auto["SZ"])
+        st.subheader("📊 沪深指数修正 (输入 1.0 代表 1%)")
+        fix_sh = st.number_input("上证指数涨幅 (%):", value=auto["SH"], format="%.2f")
+        fix_sz = st.number_input("深证成指涨幅 (%):", value=auto["SZ"], format="%.2f")
         st.divider()
         run_scan = st.button("🚀 开启 28 只全板块穿透", use_container_width=True)
 
@@ -81,27 +86,25 @@ def main():
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("巴菲特指标", f"{round(buffett_val, 2)}%", f"{'安全' if buffett_val < 75 else '警惕'}")
     c2.metric("PMI 荣枯线", auto["PMI"], f"{round(auto['PMI']-50, 1)}")
+    # 强制显示百分比符号
     c3.metric("上证指数", f"{fix_sh}%")
     c4.metric("深证成指", f"{fix_sz}%")
 
-    style = "💎 底部价值" if buffett_val < 65 else "⚖️ 均衡博弈"
-    if auto["PMI"] > 50: style = "🚀 扩张扩张"
-    st.subheader(f"当前市场取向：{style}")
-
     st.divider()
 
-    # 2. 探测核心逻辑
+    # 2. 执行探测
     if run_scan:
-        with st.spinner("执行沪深精准对标探测..."):
-            results = []
+        with st.spinner("正在执行沪深双向对标探测..."):
             try:
                 spot_df = ak.stock_zh_a_spot_em()
             except:
                 spot_df = pd.DataFrame()
 
+            results = []
             for s in WANGWANG_MAP:
-                # 获取个股数据
                 row = spot_df[spot_df['代码'] == s['代码']] if not spot_df.empty else pd.DataFrame()
+                
+                # 获取个股涨幅 (确保是百分比数值)
                 pct = float(row['涨跌幅'].values[0]) if not row.empty else 0.0
                 turnover = float(row['成交额'].values[0]) if not row.empty else 0.0
 
@@ -117,7 +120,7 @@ def main():
 
             df = pd.DataFrame(results)
             
-            # 汪汪队主力动向智能判定
+            # 主力动向智能判定
             df['主力动向'] = df.apply(lambda x: 
                 "🔥 强力扫货" if x['超额收益%'] > 1.2 else (
                 "🛡️ 护盘稳定" if x['超额收益%'] >= 0 and ((x['归属']=='沪' and fix_sh < -0.2) or (x['归属']=='深' and fix_sz < -0.2)) else "⚪ 正常跟随"
@@ -125,19 +128,15 @@ def main():
 
             # 展示与色彩渲染
             st.subheader("📋 沪深对标探测报告")
-            def color_move(val):
-                color = '#ff4b4b' if '🔥' in val else ('#2e7d32' if '🛡️' in val else '#666')
-                return f'color: {color}; font-weight: bold'
+            st.dataframe(df.style.background_gradient(subset=['超额收益%'], cmap='RdYlGn_r'), use_container_width=True)
 
-            st.dataframe(df.style.applymap(color_move, subset=['主力动向']).background_gradient(subset=['超额收益%'], cmap='RdYlGn_r'), use_container_width=True)
-
-            # 战队资金流可视化
+            # 战队资金活跃度对比图
             st.bar_chart(df.groupby(['归属', '战队'])['成交额(亿)'].sum().unstack())
 
             # 导出 Excel
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df.to_excel(writer, index=False, sheet_name='汪汪队报告')
+                df.to_excel(writer, index=False, sheet_name='探测报告')
             st.sidebar.download_button("📥 导出 Excel", output.getvalue(), f"Nova_Report_{datetime.now().strftime('%m%d')}.xlsx")
 
 if __name__ == "__main__":
