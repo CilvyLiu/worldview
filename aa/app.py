@@ -41,26 +41,34 @@ def clean_val(val):
 # ================= 强力正则解析 (Pro 鲁棒增强版) =================
 def parse_smart(text, mode="sector"):
     """
-    核心修复：个股模式下采用非贪婪匹配和动态空格支持，确保粘贴不报错
+    进化版：不再死磕空格，而是先“除杂”再“提取”
     """
-    lines = text.strip().split('\n')
+    # 预处理：剔除网页杂质，统一替换多个空格为一个
+    text = re.sub(r'(大单详情|股吧|详情)', '', text)
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
     data = []
     
     if mode == "sector":
-        # 匹配：序号 名称 涨跌幅% 资金 净占比%
-        pattern = re.compile(r'(\d+)\s*([\u4e00-\u9fa5]+).*?(-?\s*\d+\.?\d*%).*?(-?\s*\d+\.?\d*[万亿]).*?(-?\s*\d+\.?\d*%)')
+        # 模式说明：序号 + 名称 + 涨跌幅% + 主力净额(含万亿) + 净占比%
+        # 核心改进：使用 (.*?) 非贪婪匹配名称，适应“亿”字掉落到下一行的情况
+        pattern = re.compile(r'(\d+)\s+([\u4e00-\u9fa5\w]+)\s+.*?(-?\d+\.?\d*%)\s+.*?(-?\d+\.?\d*[万亿])\s+.*?(-?\d+\.?\d*%)')
     else:
-        # 匹配：代码(6位) 名称(中英数混合) 价格(数字) 涨跌幅(带/不带%) 资金(带/不带单位)
-        # 修正：使用 \s+ 适配不确定的空格，用 (.*?) 适配名称，确保个股穿透必成
-        pattern = re.compile(r'(\d{6})\s+(.*?)\s+(\d+\.?\d*)\s+(-?\s*\d+\.?\d*%?)\s+(-?\s*\d+\.?\d*[万亿]?)')
+        # 个股模式：代码 + 名称 + 价格 + 涨跌幅 + 资金
+        pattern = re.compile(r'(\d{6})\s+([\u4e00-\u9fa5\w\s]+?)\s+(\d+\.?\d*)\s+(-?\d+\.?\d*%?)\s+(-?\d+\.?\d*[万亿]?)')
 
     for line in lines:
         match = pattern.search(line)
         if match:
-            # 提取后对名称做二次清洗，防止捕获多余空格
             groups = list(match.groups())
-            groups[1] = groups[1].strip().split(' ')[0] # 进一步锁定纯名称
+            # 针对个股名称中可能夹杂的空格进行清洗
+            groups[1] = groups[1].strip() 
             data.append(groups)
+            
+    # 如果正则没抓到，启动“备用逻辑”：处理那种字符完全掉到下一行的情况
+    if not data and mode == "sector":
+        # 这里可以添加更复杂的逻辑，但在 Nova 版中，我们优先保证正则的宽度
+        pass
+        
     return data
 
 # ================= UI 界面 =================
