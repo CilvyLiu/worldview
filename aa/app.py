@@ -104,8 +104,26 @@ if st.button("🚀 开始执行智能嗅探"):
                 return ''
 
             st.dataframe(best.style.applymap(style_action, subset=['建议动作']), use_container_width=True)
+        # --- 这里就是增加的导出功能 ---
+                today_str = datetime.now().strftime("%Y%m%d_%H%M")
+                # 转换为 CSV 并编码
+                csv = best.to_csv(index=False).encode('utf-8-sig')
+                
+                st.write("---")
+                st.download_button(
+                    label="📥 点击导出最终决策清单 (CSV格式)",
+                    data=csv,
+                    file_name=f"Nova_扫货名单_{today_str}.csv",
+                    mime="text/csv",
+                )
+                st.success("名单已生成，点击上方按钮即可下载。")
+                st.balloons() # 庆祝一下
+            else:
+                st.info("未发现符合‘极品背离’或‘扫货’条件的个股。")
         else:
-            st.error("个股数据缺失或解析失败！请确保粘贴了带有代码、价格和净额的个股列表。")
+            st.error("无法解析个股数据，请确保粘贴了正确的列表。")
+    else:
+        st.error("Nova，请粘贴个股数据进行穿透。")
 
 st.markdown("""
 ---
