@@ -4,115 +4,113 @@ import numpy as np
 import re
 
 # ================= 页面配置 =================
-st.set_page_config(page_title="嗅嗅 Sniffer - 低价扫货雷达", layout="wide")
+st.set_page_config(page_title="嗅嗅 Sniffer - 扫货雷达", layout="wide")
 
-# ================= 数据清洗工具 =================
+# ================= 数据清洗核心 =================
 def clean_val(val):
-    if pd.isna(val) or val in ['-', '数据', '']: return 0.0
-    s = str(val).replace(' ', '').replace(',', '').replace('股吧', '').replace('详情', '')
+    """统一清洗数字、百分比、亿/万等格式，识别东财噪音"""
+    if pd.isna(val) or val in ['-', '数据', '']:
+        return 0.0
+    # 移除所有杂质字符
+    val = str(val).replace(' ', '').replace(',', '').replace('详情', '').replace('股吧', '')
     mult = 1.0
-    if '亿' in s:
+    if '亿' in val:
         mult = 1e8
-        s = s.replace('亿','')
-    elif '万' in s:
+        val = val.replace('亿','')
+    elif '万' in val:
         mult = 1e4
-        s = s.replace('万','')
-    if '%' in s:
+        val = val.replace('万','')
+    if '%' in val:
         mult *= 0.01
-        s = s.replace('%','')
+        val = val.replace('%','')
     try:
-        return float(s) * mult
+        return float(val) * mult
     except:
         return 0.0
 
-# ================= 核心：正则解析引擎 =================
-def parse_sticky_text(text, mode="sector"):
-    """针对东财粘连格式的强力解析"""
-    rows = []
+# ================= 强力正则解析 =================
+def parse_smart(text, mode="sector"):
+    """针对粘连格式的正则解析引擎"""
     lines = text.strip().split('\n')
+    data = []
     
     if mode == "sector":
-        # 匹配：序号 + 板块名称 + 涨跌幅(%) + 净额(万/亿) + 净占比(%)
+        # 匹配：序号 + 名称 + 涨跌幅% + 资金(万/亿) + 净占比%
         pattern = re.compile(r'(\d+)\s*([\u4e00-\u9fa5]+).*?(-?\d+\.?\d*%).*?(-?\d+\.?\d*[万亿]).*?(-?\d+\.?\d*%)')
     else:
-        # 匹配：序号 + 代码(6位) + 名称 + 价格 + 涨跌幅(%) + 净额(万/亿)
+        # 匹配：序号 + 6位代码 + 名称 + 价格 + 涨跌幅% + 资金(万/亿)
         pattern = re.compile(r'(\d+)\s*(\d{6})\s*([\u4e00-\u9fa5\s]+).*?(\d+\.\d+)\s*(-?\d+\.?\d*%).*?(-?\d+\.?\d*[万亿])')
 
     for line in lines:
-        line = line.strip()
-        if not line: continue
         match = pattern.search(line)
         if match:
-            rows.append(match.groups())
-    return rows
+            data.append(match.groups())
+    return data
 
 # ================= UI 界面 =================
-st.title("🕵️ 嗅嗅 Sniffer - 低价扫货区识别器")
-st.markdown(f"> **Nova策略：识别“资金热、股价冷”的背离。** (当前支持粘连文本识别)")
+st.title("🕵️ 嗅嗅 Sniffer - 低价扫货识别器")
+st.markdown(f"> **Nova，当前策略：First (板块) -> Next (个股) -> Finally (伏击)**")
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("第一步：初筛板块 (First)")
-    sector_raw = st.text_area("粘贴板块流向表格", height=200, placeholder="1通信设备大单详情...0.21%20.28亿")
+    sector_raw = st.text_area("粘贴板块流向数据", height=250, placeholder="支持粘连格式，如：1通信设备股吧0.21%20.28亿...")
 
 with col2:
     st.subheader("第二步：穿透个股 (Next)")
-    stock_raw = st.text_area("粘贴个股流向表格", height=200, placeholder="1002041登海种业...11.2910.04%2.26亿")
+    stock_raw = st.text_area("粘贴个股资金数据", height=250, placeholder="支持粘连格式，如：1002041登海种业11.2910.04%2.26亿...")
 
-# --- 执行嗅探 ---
-if st.button("🚀 开始执行 First-Next-Finally 嗅探"):
-    if not sector_raw or not stock_raw:
-        st.error("Nova，数据缺失，请同时粘贴板块和个股数据。")
-    else:
-        # 1. 解析板块
-        sec_data = parse_sticky_text(sector_raw, mode="sector")
-        if sec_data:
-            df_sec = pd.DataFrame(sec_data, columns=['序号', '名称', '涨跌幅', '主力净额', '净占比'])
-            for c in ['涨跌幅', '主力净额', '净占比']: df_sec[c] = df_sec[c].apply(clean_val)
-            st.write("### 📊 板块筛选 (First)")
+# ================= 执行逻辑 =================
+if st.button("🚀 开始执行智能嗅探"):
+    # --- 板块逻辑 ---
+    if sector_raw:
+        sec_rows = parse_smart(sector_raw, "sector")
+        if sec_rows:
+            df_sec = pd.DataFrame(sec_rows, columns=['序号', '名称', '涨跌幅', '主力净额', '净占比'])
+            for c in ['涨跌幅','主力净额','净占比']: df_sec[c] = df_sec[c].apply(clean_val)
+            
+            st.write("### 📊 板块初筛结果")
+            # 标记建议穿透的板块（资金流入大但涨幅小的“捂盖子”板块）
+            df_sec['穿透建议'] = df_sec.apply(lambda r: "🎯 重点去搜" if r['主力净额'] > 0 and r['涨跌幅'] < 0.015 else "观察", axis=1)
             st.dataframe(df_sec.sort_values(by='主力净额', ascending=False), use_container_width=True)
+        else:
+            st.warning("板块解析失败，请检查是否包含序号、名称、百分比及金额。")
 
-        # 2. 解析个股
-        stk_data = parse_sticky_text(stock_raw, mode="stock")
-        if stk_data:
-            df_stk = pd.DataFrame(stk_data, columns=['序号', '代码', '名称', '价格', '涨跌幅', '今日净额'])
-            df_stk['名称'] = df_stk['名称'].str.strip()
-            for c in ['价格', '涨跌幅', '今日净额']: df_stk[c] = df_stk[c].apply(clean_val)
+    # --- 个股逻辑 ---
+    if stock_raw:
+        stk_rows = parse_smart(stock_raw, "stock")
+        if stk_rows:
+            # 提取正则匹配的列
+            df_stk = pd.DataFrame(stk_rows, columns=['序号', '代码', '名称', '价格', '涨跌幅', '今日净额'])
+            for c in ['价格','涨跌幅','今日净额']: df_stk[c] = df_stk[c].apply(clean_val)
 
-            # --- 核心判断逻辑 ---
-            # Ea因子：流入除以绝对波动，数值越大说明吸筹越隐蔽且高效
+            # --- Ea 因子与信号判断 ---
             df_stk['Ea'] = df_stk['今日净额'] / (df_stk['涨跌幅'].abs() + 0.01)
+            df_stk['建议动作'] = "等待信号"
             
-            df_stk['建议动作'] = "观察中"
-            # 💎 极品背离：资金流入 (>0) 且 股价下跌 (<0)
-            mask_gold = (df_stk['今日净额'] > 0) & (df_stk['涨跌幅'] < 0)
-            df_stk.loc[mask_gold, '建议动作'] = "💎 极品背离 (主力压盘)"
-            
-            # 🎯 低价扫货：资金流入 (>0) 且 股价波动极小 (-1.5% 到 1.5%)
-            mask_ambush = (df_stk['今日净额'] > 0) & (df_stk['涨跌幅'].between(-0.015, 0.015))
-            df_stk.loc[mask_ambush & (df_stk['建议动作']=="观察中"), '建议动作'] = "🎯 低价扫货 (爆发临界)"
+            # 1. 💎 极品背离：资金入，股价跌
+            df_stk.loc[(df_stk['今日净额'] > 0) & (df_stk['涨跌幅'] < 0), '建议动作'] = "💎 极品背离 (主力压盘)"
+            # 2. 🎯 低价扫货：资金入，股价横盘 (-1.5% 到 1.5%)
+            df_stk.loc[(df_stk['今日净额'] > 0) & (df_stk['涨跌幅'].between(-0.015, 0.015)) & (df_stk['建议动作']=="等待信号"), '建议动作'] = "🎯 低价扫货 (爆发临界)"
 
-            # --- 展示结果 ---
             st.divider()
-            st.subheader("💰 嗅探结果：低价伏击名单 (Finally)")
+            st.subheader("💰 Finally: 最终伏击清单")
+            best = df_stk[df_stk['建议动作'].str.contains("💎|🎯")].sort_values(by='Ea', ascending=False)
             
-            res = df_stk[df_stk['建议动作'].str.contains("💎|🎯")].sort_values(by='Ea', ascending=False)
-            
-            def highlight_status(val):
+            def style_action(val):
                 if "💎" in val: return 'background-color: #8b0000; color: white'
                 if "🎯" in val: return 'background-color: #006400; color: white'
                 return ''
 
-            st.dataframe(
-                res.style.applymap(highlight_status, subset=['建议动作'])
-                         .background_gradient(subset=['Ea'], cmap='YlGnBu'),
-                use_container_width=True
-            )
-            
-            # 导出
-            st.download_button("📥 导出清单", res.to_csv(index=False).encode('utf-8-sig'), "ambush_list.csv")
-            
-            st.info("Nova 提示：重点关注 Ea 值极高的标的，那是主力在极窄的空间内完成了巨量换手。")
+            st.dataframe(best.style.applymap(style_action, subset=['建议动作']), use_container_width=True)
         else:
-            st.warning("未能识别个股数据，请检查粘贴格式是否正确。")
+            st.error("个股数据缺失或解析失败！请确保粘贴了带有代码、价格和净额的个股列表。")
+
+st.markdown("""
+---
+### Nova 的操作说明：
+1. **First (板块)**：贴入东财板块流向，寻找**主力净额**为正，但**涨跌幅**很小的板块。
+2. **Next (个股)**：点进选中的板块，把个股流向（今日/5日/10日均可）贴进右框。
+3. **Finally (确权)**：系统锁定 $E_a$ 因子（吸筹效率系数）极高的个股，那便是伏击点。
+""")
