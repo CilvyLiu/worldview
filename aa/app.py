@@ -3,136 +3,129 @@ import pandas as pd
 import numpy as np
 import re
 
-# =================== 1. 强力数据清洗引擎 (智能适配偏移) ===================
+# ================= 页面配置 =================
+st.set_page_config(page_title="嗅嗅 Sniffer - 低价扫货雷达", layout="wide")
 
-def to_num(s):
-    if pd.isna(s): return 0.0
-    s = str(s).strip().replace(',', '').replace('%', '')
-    match = re.search(r'[-+]?\d*\.?\d+', s)
-    if not match: return 0.0
-    val = float(match.group())
-    if '亿' in s: val *= 1e8
-    if '万' in s: val *= 1e4
-    return val
-
-def clean_em_data(raw_text, mode="sector"):
-    """
-    智能列定位逻辑：
-    不再死板锁定索引，而是通过数值特征寻找目标列
-    """
+# ================= 数据清洗函数 =================
+def clean_val(val):
+    """统一清洗数字、百分比、亿/万等格式"""
+    if pd.isna(val) or val in ['-', '数据', '']:
+        return 0.0
+    val = str(val).replace(' ', '').replace(',', '').replace('股吧', '').replace('详情', '')
+    mult = 1.0
+    if '亿' in val:
+        mult = 1e8
+        val = val.replace('亿','')
+    elif '万' in val:
+        mult = 1e4
+        val = val.replace('万','')
+    if '%' in val:
+        mult *= 0.01
+        val = val.replace('%','')
     try:
-        lines = [l.strip() for l in raw_text.strip().split('\n') if l.strip()]
-        lines = [l for l in lines if not re.search(r'名称|代码|涨幅|主力|占比|序号', l)]
-        data = [re.split(r'\s+', l) for l in lines]
-        df = pd.DataFrame(data)
-        if df.empty: return pd.DataFrame()
+        return float(val) * mult
+    except Exception as e:
+        return 0.0
 
-        processed = pd.DataFrame()
-        
-        if mode == "sector":
-            # 1. 抓取名称 (通常是第一列非数字列)
-            processed['名称'] = df.iloc[:, 1]
-            
-            # 2. 寻找涨幅列 (通常是第4列)
-            processed['今日涨幅'] = df.iloc[:, 3].apply(to_num)
-            
-            # 3. 智能定位占比：在第5列和第6列中，寻找数值绝对值较小的那一列
-            # 占比通常 < 100，金额通常 > 1000
-            col_a = df.iloc[:, 4].apply(to_num)
-            col_b = df.iloc[:, 5].apply(to_num)
-            
-            # 逻辑：如果 col_b 的平均值很大，说明它是金额，则去取 col_a
-            if col_b.abs().mean() > 1000:
-                processed['主力占比'] = col_a
-            else:
-                processed['主力占比'] = col_b
-                
-            return processed.dropna(subset=['名称'])
-        else:
-            # 个股模式：逻辑相对固定
-            processed['代码'] = df.iloc[:, 1].astype(str)
-            processed['名称'] = df.iloc[:, 2]
-            # 同样逻辑寻找金额列
-            col_last = df.iloc[:, -2].apply(to_num) # 倒数第二列通常是净额
-            processed['主力净额'] = col_last
-            return processed.dropna(subset=['名称'])
-            
-    except Exception:
-        return pd.DataFrame()
+# ================= 文本解析 =================
+def parse_em_text(text):
+    """用正则匹配序号开头，解析文本表格"""
+    rows = []
+    for line in text.strip().split('\n'):
+        line = line.strip()
+        if not line: continue
+        parts = line.split()
+        # 识别以数字序号开头的行（如 1, 2, 3...）
+        if parts and re.match(r'^\d+', parts[0]):
+            rows.append(parts)
+    return rows
 
-# =================== 2. 投行审计内核 (First -> Next) ===================
+# ================= UI 界面 =================
+st.title("🕵️ 嗅嗅 Sniffer - 低价扫货区识别器")
+st.markdown("> **Nova策略：寻找“资金热、股价冷”的静默背离区间。**")
 
-def run_sniffer_audit(df, mode="stock"):
-    # 确保数值类型
-    cols = [c for c in df.columns if c not in ['名称', '代码', '审计状态']]
-    for c in cols:
-        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-    
-    if mode == "sector":
-        # First: L-H 扫货区审计 (Nova 指令：占比>3%, 涨幅<2%)
-        # 增加主力占比 < 100 的约束，排除金额列误抓
-        mask = (df['主力占比'] > 3.0) & (df['主力占比'] < 100.0) & (df['今日涨幅'] < 2.0)
-        df['审计状态'] = np.where(mask, "🚩 重点关注 (L-H扫货区)", "待机")
-        return df.sort_values(by='主力占比', ascending=False)
-    
+# --- 数据输入 ---
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("第一步：初筛板块 (First)")
+    sector_raw = st.text_area("粘贴板块资金流向表格", height=200, placeholder="序号 名称 涨跌幅 今日主力净流入...")
+
+with col2:
+    st.subheader("第二步：穿透个股 (Next)")
+    stock_raw = st.text_area("粘贴个股资金详情（今日/5日/10日均可）", height=200, placeholder="序号 代码 名称 最新价 涨跌幅 今日主力净流入...")
+
+# --- 执行嗅探 ---
+if st.button("🚀 开始嗅探低价扫货区"):
+    if not sector_raw or not stock_raw:
+        st.error("Nova，数据缺失，请先粘贴东方财富的网页数据。")
     else:
-        # Next: 穿透审计 [Ea, Sm, Signal]
-        df['Ea'] = df['今日主力'] / 210000000  # 假设以2.1亿为基准单位
-        df['weighted_sum'] = df['今日主力']*0.5 + df['5日主力']*0.3 + df['10日主力']*0.2
-        df['std_flow'] = df.apply(lambda x: np.std([x['今日主力'], x['5日主力'], x['10日主力']]), axis=1)
-        df['Sm'] = df['weighted_sum'] / (df['std_flow'] + 1)
-        
-        # Signal 爆发点识别
-        df['is_target'] = (df['今日主力'] > 0) & (df['5日主力'] < 0) & (df['10日主力'] < 0)
-        
-        def get_label(row):
-            if row['is_target']: return "💎 爆发点确认"
-            if row['今日主力'] > 0 and row['5日主力'] > 0: return "📈 持续吸筹"
-            return "洗盘中"
-            
-        df['审计状态'] = df.apply(get_label, axis=1)
-        return df.sort_values(by='Ea', ascending=False)
+        # -------- 板块初筛 --------
+        sec_rows = parse_em_text(sector_raw)
+        if len(sec_rows) == 0:
+            st.warning("未解析到有效板块数据。")
+        else:
+            # 索引映射：1:名称, 3:涨跌幅, 4:主力净额, 5:净占比
+            df_sec = pd.DataFrame(sec_rows).iloc[:, [1, 3, 4, 5]].copy()
+            df_sec.columns = ['名称', '涨跌幅', '主力净额', '净占比']
+            for c in ['涨跌幅','主力净额','净占比']:
+                df_sec[c] = df_sec[c].apply(clean_val)
+            st.subheader("📊 板块初筛结果")
+            st.dataframe(df_sec.sort_values(by='净占比', ascending=False), use_container_width=True)
 
-# =================== 3. 界面逻辑 ===================
+        # -------- 个股穿透 --------
+        stk_rows = parse_em_text(stock_raw)
+        if len(stk_rows) == 0:
+            st.warning("未解析到有效个股数据。")
+        else:
+            # 索引映射：1:代码, 2:名称, 4:最新价, 5:涨跌幅, 6:今日净额
+            df_stk = pd.DataFrame(stk_rows).iloc[:, [1,2,4,5,6]].copy()
+            df_stk.columns = ['代码','名称','价格','涨跌幅','今日净额']
+            for c in ['价格','涨跌幅','今日净额']:
+                df_stk[c] = df_stk[c].apply(clean_val)
 
-st.set_page_config(page_title="Sniffer Pro", layout="wide")
-st.title("🏛️ Sniffer 嗅嗅 - 投行数据审计终端")
+            # --- Ea 因子计算 (静默吸筹效率) ---
+            # 原理：Ea = 净流入 / (振幅 + 0.01)，寻找波动极小但流入巨大的个股
+            df_stk['Ea'] = df_stk['今日净额'] / (df_stk['涨跌幅'].abs() + 0.01)
+            df_stk['Ea'] = df_stk['Ea'].clip(upper=1e10)
 
-# Step 1
-st.header("Step 1: First")
-sector_input = st.text_area("📥 粘贴板块全行数据", height=100)
-if st.button("🚀 执行板块初筛", use_container_width=True):
-    if sector_input:
-        res = run_sniffer_audit(clean_em_data(sector_input, mode="sector"), mode="sector")
-        if not res.empty:
-            st.table(res[['名称', '今日涨幅', '主力占比', '审计状态']])
-            # 帮助检查
-            if res['主力占比'].mean() > 100:
-                st.error("警告：识别到的占比数值过大，请确认是否误抓了金额列。")
+            # --- 建议动作判定 ---
+            df_stk['建议动作'] = "等待信号"
+            # 1️⃣ 极品背离：股价跌但资金入
+            mask_gold = (df_stk['今日净额'] > 0) & (df_stk['涨跌幅'] < 0)
+            df_stk.loc[mask_gold,'建议动作'] = "💎 极品背离 (主力压盘)"
+            # 2️⃣ 低价扫货区：横盘震荡但资金入
+            mask_ambush = (df_stk['今日净额'] > 0) & (df_stk['涨跌幅'].between(-0.02, 0.02))
+            df_stk.loc[mask_ambush & (df_stk['建议动作']=="等待信号"), '建议动作'] = "🎯 低价扫货区 (重点关注)"
 
-st.divider()
+            # --- 展示 ---
+            st.divider()
+            st.subheader("💰 嗅探结果：低价伏击名单")
+            # 筛选出有信号的个股并按吸筹效率排序
+            best_buys = df_stk[df_stk['建议动作'].str.contains("🎯|💎")].sort_values(by='Ea', ascending=False)
 
-# Step 2
-st.header("Step 2: Next")
-c1, c2, c3 = st.columns(3)
-with c1: in_t = st.text_area("1. 今日个股资金", height=120)
-with c2: in_5 = st.text_area("2. 5日个股资金", height=120)
-with c3: in_10 = st.text_area("3. 10日个股资金", height=120)
+            # 高亮展示函数
+            def highlight_status(val):
+                if "💎" in val: return 'background-color: #7d1b1b; color: white; font-weight: bold'
+                if "🎯" in val: return 'background-color: #1b4d3e; color: white; font-weight: bold'
+                return ''
 
-if st.button("🔍 执行深度审计", use_container_width=True):
-    if in_t and in_5 and in_10:
-        dt = clean_em_data(in_t, mode="stock").rename(columns={'主力净额':'今日主力'})
-        d5 = clean_em_data(in_5, mode="stock").rename(columns={'主力净额':'5日主力'})
-        d10 = clean_em_data(in_10, mode="stock").rename(columns={'主力净额':'10日主力'})
-        
-        try:
-            m = pd.merge(dt, d5, on=['代码','名称']).merge(d10, on=['代码','名称'])
-            res = run_sniffer_audit(m, mode="stock")
-            st.table(res[['名称', '代码', 'Ea', 'Sm', '审计状态']])
-            
-            targets = res[res['审计状态'] == "💎 爆发点确认"]['名称'].tolist()
-            if targets:
-                st.success(f"🎯 潜伏目标锁定：{', '.join(targets)}")
-                st.warning("⚠️ Finally: 请确认 15 分钟 K 线缩量上涨形态！")
-        except:
-            st.error("数据合并失败，请确保粘贴的是同一板块的三份清单。")
+            st.dataframe(
+                best_buys.style.applymap(highlight_status, subset=['建议动作'])
+                             .background_gradient(subset=['Ea'], cmap='YlGnBu'),
+                use_container_width=True
+            )
+
+            # --- 导出功能 ---
+            csv_data = best_buys.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 导出低价扫货名单 CSV", csv_data, "low_price_sniffer.csv", "text/csv")
+
+            # --- 操作清单 ---
+            st.markdown("""
+            ### Nova 的操作清单 (First, Next, Finally)：
+            1. **First (初筛)**: 观察左侧表格，锁定“净占比”高但“涨跌幅”平淡的板块。
+            2. **Next (穿透)**: 查看右侧 $E_a$ 因子。$E_a$ 值越高，代表主力吸筹效率越高且越隐蔽。
+            3. **Finally (确权)**: 
+                * **💎 极品背离**：主力正在趁着回调或压盘通过“静默期”吸纳廉价筹码。
+                * **🎯 低价扫货区**：股价长期横盘不动，主力通过小单缓慢蚕食，即将进入临界爆发点。
+            """)
