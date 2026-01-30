@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+from datetime import datetime
 
 # ================= 页面配置 =================
 st.set_page_config(page_title="嗅嗅 Sniffer - 扫货雷达", layout="wide")
@@ -96,39 +97,34 @@ if st.button("🚀 开始执行智能嗅探"):
 
             st.divider()
             st.subheader("💰 Finally: 最终伏击清单")
-            best = df_stk[df_stk['建议动作'].str.contains("💎|🎯")].sort_values(by='Ea', ascending=False)
+            best = df_stk[df_stk['建议动作'].str.contains("💎|🎯")].copy().sort_values(by='Ea', ascending=False)
             
-            def style_action(val):
-                if "💎" in val: return 'background-color: #8b0000; color: white'
-                if "🎯" in val: return 'background-color: #006400; color: white'
-                return ''
+            if not best.empty:
+                def style_action(val):
+                    if "💎" in val: return 'background-color: #8b0000; color: white'
+                    if "🎯" in val: return 'background-color: #006400; color: white'
+                    return ''
 
-            st.dataframe(best.style.applymap(style_action, subset=['建议动作']), use_container_width=True)
-        # --- 这里就是增加的导出功能 ---
-                today_str = datetime.now().strftime("%Y%m%d_%H%M")
-                # 转换为 CSV 并编码
-                csv = best.to_csv(index=False).encode('utf-8-sig')
+                st.dataframe(best.style.applymap(style_action, subset=['建议动作']), use_container_width=True)
                 
-                st.write("---")
+                # --- 新增：决策清单导出功能 ---
+                today_str = datetime.now().strftime("%Y%m%d_%H%M")
+                csv_data = best.to_csv(index=False).encode('utf-8-sig')
                 st.download_button(
-                    label="📥 点击导出最终决策清单 (CSV格式)",
-                    data=csv,
-                    file_name=f"Nova_扫货名单_{today_str}.csv",
-                    mime="text/csv",
+                    label="📥 导出最终决策清单 (CSV)",
+                    data=csv_data,
+                    file_name=f"Nova_扫货决策_{today_str}.csv",
+                    mime="text/csv"
                 )
-                st.success("名单已生成，点击上方按钮即可下载。")
-                st.balloons() # 庆祝一下
             else:
-                st.info("未发现符合‘极品背离’或‘扫货’条件的个股。")
+                st.info("未探测到符合条件的‘极品背离’或‘低价扫货’标的。")
         else:
-            st.error("无法解析个股数据，请确保粘贴了正确的列表。")
-    else:
-        st.error("Nova，请粘贴个股数据进行穿透。")
+            st.error("个股数据缺失或解析失败！请确保粘贴了带有代码、价格和净额的个股列表。")
 
 st.markdown("""
 ---
 ### Nova 的操作说明：
-1. **First (板块)**：贴入东财板块流向，寻找**主力净额**为正，但**涨跌幅**很小的板块。
-2. **Next (个股)**：点进选中的板块，把个股流向（今日/5日/10日均可）贴进右框。
-3. **Finally (确权)**：系统锁定 $E_a$ 因子（吸筹效率系数）极高的个股，那便是伏击点。
+1. **First (初筛)**：贴入东财板块流向，寻找**主力净额**为正，但**涨跌幅**很小的板块。
+2. **Next (穿透)**：点进选中的板块，把个股流向（今日/5日/10日均可）贴进右框。
+3. **Finally (确权)**：系统锁定 $E_a$ 因子（吸筹效率系数）极高的个股，点击下载按钮保存决策。
 """)
