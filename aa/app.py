@@ -81,13 +81,17 @@ with col2:
     stock_raw = st.text_area("直接粘贴东财【个股流向】列表", height=250, placeholder="002415 海康威视 31.33 -2.70% -1.83亿 ...")
 
 # ================= 执行逻辑 =================
+# ================= 执行逻辑 =================
 if st.button("🚀 执行 Nova 实盘量化分析"):
     
-    # --- 1. 板块逻辑 (Nova 5日静默突围·容错审计版) ---
+    # --- 1. 板块逻辑 (Nova 5日静默突围·全维度去噪审计版) ---
     if sector_raw:
-        sec_rows = parse_smart(sector_raw, "sector")
+        # 预清洗：剔除表格中的网页杂质干扰词，确保 parse_smart 能正确识别列
+        cleaned_sector = sector_raw.replace("相关", "").replace("大单详情", "").replace("股吧", "")
+        sec_rows = parse_smart(cleaned_sector, "sector")
+        
         if sec_rows:
-            # 标准13列定义
+            # 完整 13 列标准定义
             expected_cols = [
                 '序号', '名称', '涨跌幅', 
                 '主力净额', '主力净占比', 
@@ -97,53 +101,56 @@ if st.button("🚀 执行 Nova 实盘量化分析"):
                 '小单净额', '小单净占比'
             ]
             
-            # --- 自动对齐：解决 ValueError 核心逻辑 ---
-            actual_col_count = len(sec_rows[0])
-            # 仅截取与实际数据匹配的列名长度
-            df_sec = pd.DataFrame(sec_rows, columns=expected_cols[:actual_col_count])
+            # 核心修正：由于你复制的数据行末尾带有“最大股名称”，我们强制截取前 13 列进行对齐
+            processed_rows = [row[:13] for row in sec_rows if len(row) >= 5]
+            
+            if processed_rows:
+                actual_col_count = len(processed_rows[0])
+                # 仅截取与实际数据匹配的列名长度
+                df_sec = pd.DataFrame(processed_rows, columns=expected_cols[:actual_col_count])
 
-            # 数值清洗
-            num_cols = [c for c in df_sec.columns if c not in ['序号', '名称']]
-            for c in num_cols:
-                df_sec[c] = df_sec[c].apply(clean_val)
+                # 数值清洗
+                num_cols = [c for c in df_sec.columns if c not in ['序号', '名称']]
+                for c in num_cols:
+                    df_sec[c] = df_sec[c].apply(clean_val)
 
-            st.write("### 📊 5日主力结构审计（Nova 静默突围）")
+                st.write("### 📊 5日主力结构审计（Nova 静默突围）")
 
-            # --- 深度审计（仅在数据维度完整时开启） ---
-            if actual_col_count >= 13:
-                # 1. 核心准则判断
-                condition = (
-                    (df_sec['主力净额'] > 5000) & 
-                    (df_sec['主力净占比'] >= 1.5) & 
-                    (df_sec['涨跌幅'].between(0.0, 5.0)) & 
-                    (df_sec['超大单净额'] >= 0) & 
-                    (df_sec['大单净额'] >= 0) &
-                    (df_sec['小单净额'] <= 0)
-                )
+                # --- 深度审计（仅在维度完整时开启） ---
+                if actual_col_count >= 13:
+                    # 核心准则：排除大额流出，寻找“主力压盘吸筹+散户撤退”
+                    condition = (
+                        (df_sec['主力净额'] > 0) & 
+                        (df_sec['主力净占比'] >= 1.0) & 
+                        (df_sec['涨跌幅'].between(-2.0, 5.0)) & 
+                        (df_sec['超大单净额'] >= 0) & 
+                        (df_sec['小单净额'] <= 0) # 灵魂：散户出货
+                    )
 
-                # 2. 计算吸筹效率 (弹簧效应)
-                df_sec['吸筹效率'] = df_sec['主力净额'] / (df_sec['涨跌幅'].abs() + 0.5)
-                df_sec['穿透建议'] = np.where(condition, "🚀 5日静默吸筹", "观察")
-                
-                # 3. 捕捉突围信号 (效率前30%)
-                eff_threshold = df_sec['吸筹效率'].quantile(0.7)
-                df_sec.loc[condition & (df_sec['吸筹效率'] >= eff_threshold), '穿透建议'] = "🔥 静默 -> 突围前夜"
+                    # 计算吸筹效率 (弹簧效应)
+                    df_sec['吸筹效率'] = df_sec['主力净额'] / (df_sec['涨跌幅'].abs() + 0.5)
+                    df_sec['穿透建议'] = np.where(condition, "🚀 5日静默吸筹", "观察")
+                    
+                    # 捕捉突围信号 (在有正向流入的板块中找效率前30%)
+                    valid_flow = df_sec[df_sec['主力净额'] > 0]
+                    if not valid_flow.empty:
+                        eff_threshold = valid_flow['吸筹效率'].quantile(0.7)
+                        df_sec.loc[condition & (df_sec['吸筹效率'] >= eff_threshold), '穿透建议'] = "🔥 静默 -> 突围前夜"
 
-                # 样式渲染
-                def style_audit(val):
-                    if "🔥" in str(val): return 'background-color: #8b0000; color: #ffffff; font-weight: bold'
-                    if "🚀" in str(val): return 'background-color: #1e3d59; color: #ffc13b'
-                    return ''
+                    # 样式渲染
+                    def style_audit(val):
+                        if "🔥" in str(val): return 'background-color: #8b0000; color: #ffffff; font-weight: bold'
+                        if "🚀" in str(val): return 'background-color: #1e3d59; color: #ffc13b'
+                        return ''
 
-                st.dataframe(
-                    df_sec.sort_values(by='吸筹效率', ascending=False).style.applymap(style_audit, subset=['穿透建议']), 
-                    use_container_width=True
-                )
-            else:
-                # 降级模式：数据列数不足时的处理
-                st.warning(f"💡 检测到数据列数({actual_col_count})不完整，已切换至基础筛选模式。")
-                df_sec['穿透建议'] = np.where((df_sec['主力净额'] > 0) & (df_sec['涨跌幅'] < 2.5), "🎯 关注", "观察")
-                st.dataframe(df_sec.sort_values(by='主力净额', ascending=False), use_container_width=True)
+                    st.dataframe(
+                        df_sec.sort_values(by='主力净额', ascending=False).style.applymap(style_audit, subset=['穿透建议']), 
+                        use_container_width=True
+                    )
+                else:
+                    st.warning(f"💡 检测到数据列数({actual_col_count})不足，建议提供完整5日流向表。")
+                    df_sec['穿透建议'] = np.where((df_sec['主力净额'] > 0) & (df_sec['涨跌幅'] < 2.5), "🎯 关注", "观察")
+                    st.dataframe(df_sec.sort_values(by='主力净额', ascending=False), use_container_width=True)
     # --- 2. 个股逻辑 ---
     if stock_raw:
         stk_rows = parse_smart(stock_raw, "stock")
