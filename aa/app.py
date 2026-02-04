@@ -83,19 +83,24 @@ with col2:
 # ================= 执行逻辑 =================
 if st.button("🚀 执行 Nova 实盘量化分析"):
     
-# --- 1. 板块逻辑 (Nova 5日静默突围·结构审计版) ---
+    # --- 1. 板块逻辑 (Nova 5日静默突围·容错审计版) ---
     if sector_raw:
         sec_rows = parse_smart(sector_raw, "sector")
         if sec_rows:
-            # 动态匹配列名（适配 5日完整资金流向表结构）
-            df_sec = pd.DataFrame(sec_rows, columns=[
+            # 标准13列定义
+            expected_cols = [
                 '序号', '名称', '涨跌幅', 
                 '主力净额', '主力净占比', 
                 '超大单净额', '超大单净占比', 
                 '大单净额', '大单净占比', 
                 '中单净额', '中单净占比', 
                 '小单净额', '小单净占比'
-            ])
+            ]
+            
+            # --- 自动对齐：解决 ValueError 核心逻辑 ---
+            actual_col_count = len(sec_rows[0])
+            # 仅截取与实际数据匹配的列名长度
+            df_sec = pd.DataFrame(sec_rows, columns=expected_cols[:actual_col_count])
 
             # 数值清洗
             num_cols = [c for c in df_sec.columns if c not in ['序号', '名称']]
@@ -104,42 +109,41 @@ if st.button("🚀 执行 Nova 实盘量化分析"):
 
             st.write("### 📊 5日主力结构审计（Nova 静默突围）")
 
-            # ================= Nova 核心审计准则 =================
-            # 1. 主力净额：≥5000万 (5000) - 针对板块级初选
-            # 2. 净占比：≥1.5% - 机构真实控盘线
-            # 3. 涨跌幅：0% ~ 5% - 拒绝追高，锁定静默吸筹区
-            # 4. 结构正向：超大单 & 大单双为正 (机构在买)
-            # 5. 筹码交换：小单净额为负 (散户在卖，筹码锁定)
-            
-            condition = (
-                (df_sec['主力净额'] > 5000) & 
-                (df_sec['主力净占比'] >= 1.5) & 
-                (df_sec['涨跌幅'].between(0.0, 5.0)) & 
-                (df_sec['超大单净额'] >= 0) & 
-                (df_sec['大单净额'] >= 0) &
-                (df_sec['小单净额'] <= 0)
-            )
+            # --- 深度审计（仅在数据维度完整时开启） ---
+            if actual_col_count >= 13:
+                # 1. 核心准则判断
+                condition = (
+                    (df_sec['主力净额'] > 5000) & 
+                    (df_sec['主力净占比'] >= 1.5) & 
+                    (df_sec['涨跌幅'].between(0.0, 5.0)) & 
+                    (df_sec['超大单净额'] >= 0) & 
+                    (df_sec['大单净额'] >= 0) &
+                    (df_sec['小单净额'] <= 0)
+                )
 
-            # 计算吸筹效率：资金/涨幅比，值越大代表“压盘吸筹”越明显
-            df_sec['吸筹效率'] = df_sec['主力净额'] / (df_sec['涨跌幅'].abs() + 0.5)
-            
-            # 决策判定
-            df_sec['穿透建议'] = np.where(condition, "🚀 5日静默吸筹", "观察")
-            
-            # 叠加突围信号：在吸筹基础上，效率处于前 30% 的标的
-            eff_threshold = df_sec['吸筹效率'].quantile(0.7)
-            df_sec.loc[condition & (df_sec['吸筹效率'] >= eff_threshold), '穿透建议'] = "🔥 静默 -> 突围前夜"
+                # 2. 计算吸筹效率 (弹簧效应)
+                df_sec['吸筹效率'] = df_sec['主力净额'] / (df_sec['涨跌幅'].abs() + 0.5)
+                df_sec['穿透建议'] = np.where(condition, "🚀 5日静默吸筹", "观察")
+                
+                # 3. 捕捉突围信号 (效率前30%)
+                eff_threshold = df_sec['吸筹效率'].quantile(0.7)
+                df_sec.loc[condition & (df_sec['吸筹效率'] >= eff_threshold), '穿透建议'] = "🔥 静默 -> 突围前夜"
 
-            # 样式渲染
-            def style_audit(val):
-                if "🔥" in str(val): return 'background-color: #8b0000; color: #ffffff; font-weight: bold'
-                if "🚀" in str(val): return 'background-color: #1e3d59; color: #ffc13b'
-                return ''
+                # 样式渲染
+                def style_audit(val):
+                    if "🔥" in str(val): return 'background-color: #8b0000; color: #ffffff; font-weight: bold'
+                    if "🚀" in str(val): return 'background-color: #1e3d59; color: #ffc13b'
+                    return ''
 
-            st.dataframe(
-                df_sec.sort_values(by='吸筹效率', ascending=False).style.applymap(style_audit, subset=['穿透建议']), 
-                use_container_width=True
-            )
+                st.dataframe(
+                    df_sec.sort_values(by='吸筹效率', ascending=False).style.applymap(style_audit, subset=['穿透建议']), 
+                    use_container_width=True
+                )
+            else:
+                # 降级模式：数据列数不足时的处理
+                st.warning(f"💡 检测到数据列数({actual_col_count})不完整，已切换至基础筛选模式。")
+                df_sec['穿透建议'] = np.where((df_sec['主力净额'] > 0) & (df_sec['涨跌幅'] < 2.5), "🎯 关注", "观察")
+                st.dataframe(df_sec.sort_values(by='主力净额', ascending=False), use_container_width=True)
     # --- 2. 个股逻辑 ---
     if stock_raw:
         stk_rows = parse_smart(stock_raw, "stock")
