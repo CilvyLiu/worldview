@@ -157,23 +157,61 @@ if st.button("🚀 执行 Nova 实盘量化分析"):
             df_stk.loc[mask_ready, '建议动作'] = "🎯 低价扫货"
             df_stk.loc[mask_gold, '建议动作'] = "💎 极品背离"
             df_stk.loc[mask_fake, '建议动作'] = "🧨 警惕接盘"
+# ================= 3. 下一交易日砸盘预警模块 (Nova Pro 增强) =================
+            # 1. 计算乖离率 (Bias)
+            df_stk['乖离率'] = 0.0
+            if '均价' in stock_raw:
+                # 尝试用正则从原文中提取均价数值
+                avg_match = re.search(r'均价[:：]?\s*(\d+\.?\d*)', stock_raw)
+                if avg_match:
+                    avg_price = float(avg_match.group(1))
+                    df_stk['乖离率'] = (df_stk['价格数值'] - avg_price) / avg_price * 100
+
+            # 2. 定义风险因子
+            # A: 高位滞涨 (涨幅 > 4% 且未跌破均价但也没封板)
+            risk_a = np.where(df_stk['涨跌实数'] > 4.0, 30, 0)
+            # B: 弱动能 (Ea 因子过低，说明资金撑不住这个涨幅)
+            risk_b = np.where(df_stk['Ea'] < 300, 25, 0) 
+            # C: 节前效应 (今天是倒数第6天，权重拉满)
+            # 2月6日是周五，today_day=4。设定下周一(0)到三(2)为高压区
+            today_day = datetime.now().weekday() 
+            is_holiday_pressure = 25 if today_day <= 2 or today_day == 4 else 0 
+            
+            df_stk['风险值'] = risk_a + risk_b + is_holiday_pressure
+
+            # 3. 判定砸盘等级
+            def judge_crash(row):
+                if row['主力万元'] < 0 and row['涨跌实数'] > 0: return "📉 诱多砸盘"
+                if row['风险值'] >= 50: return "🚨 极高风险"
+                if row['风险值'] >= 30: return "⚠️ 高风险"
+                return "✅ 风险受控"
+
+            df_stk['砸盘预警'] = df_stk.apply(judge_crash, axis=1)
+
+            # ================= 4. UI 渲染增强 =================
+            def style_all(val):
+                # 动作颜色
+                if "💎" in str(val): return 'background-color: #8b0000; color: white'
+                if "🎯" in str(val): return 'background-color: #006400; color: white'
+                if "🧨" in str(val): return 'background-color: #444444; color: #ff4b4b'
+                # 砸盘颜色
+                if "🚨" in str(val): return 'background-color: #ff4b4b; color: white; font-weight: bold'
+                if "⚠️" in str(val): return 'background-color: #ffa500; color: black'
+                if "📉" in str(val): return 'background-color: #7d3cff; color: white'
+                return ''
 
             st.divider()
             st.subheader("💰 Finally: 最终决策清单")
             
             best = df_stk[df_stk['建议动作'] != "观察"].copy().sort_values(by='Ea', ascending=False)
-            best['Ea'] = best['Ea'].round(2)
-            
             if not best.empty:
-                def style_action(val):
-                    if "💎" in val: return 'background-color: #8b0000; color: white'
-                    if "🎯" in val: return 'background-color: #006400; color: white'
-                    if "🧨" in val: return 'background-color: #444444; color: #ff4b4b'
-                    return ''
-
-                show_cols = ['代码', '名称', '价格', '涨跌幅', '今日净额', 'Ea', '建议动作']
-                st.dataframe(best[show_cols].style.applymap(style_action, subset=['建议动作']), use_container_width=True)
-                
+                show_cols = ['代码', '名称', '价格', '涨跌幅', '今日净额', 'Ea', '建议动作', '砸盘预警']
+                # 注意：这里改用 apply 作用于整个 subset
+                st.dataframe(
+                    best[show_cols].style.applymap(style_all, subset=['建议动作', '砸盘预警']), 
+                    use_container_width=True
+                )
+           
                 # --- 导出功能 ---
                 today_str = datetime.now().strftime("%Y%m%d_%H%M")
                 csv_data = best[show_cols].to_csv(index=False).encode('utf-8-sig')
