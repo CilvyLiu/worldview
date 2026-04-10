@@ -127,7 +127,7 @@ if st.button("🚀 执行 Nova 实盘量化分析"):
                 return ''
 
             st.dataframe(
-                df_sec.sort_values(by='吸筹效率', ascending=False).style.applymap(style_audit, subset=['穿透建议']), 
+                df_sec.sort_values(by='吸筹效率', ascending=False).style.map(style_audit, subset=['穿透建议']), 
                 use_container_width=True
             )
     # --- 2. 个股逻辑 ---
@@ -216,7 +216,7 @@ if st.button("🚀 执行 Nova 实盘量化分析"):
                 
                 # 渲染最终表格
                 st.dataframe(
-                    best[show_cols].style.applymap(style_all, subset=['建议动作', '砸盘预警']), 
+                    best[show_cols].style.map(style_all, subset=['建议动作', '砸盘预警']), 
                     use_container_width=True
                 )
                 
