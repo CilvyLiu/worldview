@@ -142,7 +142,7 @@ if st.button("🚀 执行 Nova 实盘量化分析"):
 
             # --- Ea 因子防爆炸保险 ---
             # Ea = 资金 / 振幅。np.clip 确保分母不为0，防止数据异常导致结果无穷大。
-            df_stk['Ea'] = df_stk['主力万元'] / np.clip(df_stk['涨跌实数'].abs(), 0.3, None)
+            df_stk['Ea'] = df_stk['主力万元'] / np.clip(df_stk['涨跌实数'].abs(), 0.5, None)
             
             # --- 决策信号层 ---
             df_stk['建议动作'] = "观察"
@@ -160,14 +160,14 @@ if st.button("🚀 执行 Nova 实盘量化分析"):
 # ================= 3. 下一交易日砸盘预警模块 (Nova 逻辑压榨版) =================
             # 1. 风险因子计算
             # 动能枯竭因子：涨幅 > 2% 但资金跟不上 (Ea < 300)
-            risk_a = np.where((df_stk['涨跌实数'] > 2.0) & (df_stk['Ea'] < 300), 30, 0)
+            risk_a = np.where((df_stk['涨跌实数'] > 2.0) & (df_stk['Ea'] < 800), 30, 0)
             
             # 乖离/获利盘压力因子：涨幅过高 (>7%) 或 连续三日数据过热
             risk_b = np.where(df_stk['涨跌实数'] > 7.0, 20, 0)
             
             # 节前效应因子 (ENTP 专属：2月6日周五效应)
             today_day = datetime.now().weekday() 
-            is_holiday_pressure = 25 if today_day == 4 or today_day <= 1 else 0 
+            is_holiday_pressure = 15 if today_day == 4 else 0
             
             df_stk['风险值'] = risk_a + risk_b + is_holiday_pressure
 
@@ -178,13 +178,13 @@ if st.button("🚀 执行 Nova 实盘量化分析"):
                     return "📉 诱多砸盘"
                 
                 # 【预测场景 B】：横盘出货 (股价不动，钱在狂撤 —— 针对大华 18.51 逻辑)
-                # 逻辑：价格波幅极小 (abs < 0.8%) 但主力流出显著 (> 800万)
-                if abs(row['涨跌实数']) < 0.8 and row['主力万元'] < -800:
+                # 逻辑：价格波幅极小 (abs < 0.8%) 但主力流出显著 (> 3000万)
+                if abs(row['涨跌实数']) < 0.8 and row['主力万元'] < -3000:
                     return "🚨 横盘派发"
                 
                 # 【预测场景 C】：动能透支 (高风险区间)
-                if row['风险值'] >= 50: return "🚨 极高风险"
-                if row['风险值'] >= 30: return "⚠️ 高风险"
+                if row['风险值'] >= 70: return "🚨 极高风险"
+                if row['风险值'] >= 40: return "⚠️ 高风险"
                 
                 return "✅ 风险受控"
 
